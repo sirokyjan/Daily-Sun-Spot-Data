@@ -303,57 +303,123 @@ def print_data_head(*data, num_rows=5, column_name=None):
         
     print("-" * 50)
 
-def replace_yearly_data(sales_df, start_date_str, length_days, source_year):
+def delete_first_x_data_rows(df, rows_to_skip):
     """
-    Replaces a segment of a time series with data from the same period in a different year.
-    This version is optimized for performance on large DataFrames.
+    Deletes the first X data rows from a loaded pandas DataFrame, 
+    preserving the header (column names).
 
     Args:
-        sales_df (pd.DataFrame): DataFrame with sales data, including a 'date' column.
-        start_date_str (str): The start date of the period to replace (e.g., "2023-01-15").
-        length_days (int): The number of days to replace from the start date.
-        source_year (int): The year to copy the data from.
-
+        df (pd.DataFrame): The input DataFrame that has already been loaded.
+        rows_to_skip (int): The number of data rows (after the header) to delete.
+                            Must be a non-negative integer.
+    
     Returns:
-        pd.DataFrame: A new DataFrame with the specified date range replaced.
+        pd.DataFrame: A new DataFrame with the first X data rows removed.
+                      Returns None if an error occurs.
     """
+    if not isinstance(df, pd.DataFrame):
+        print("Error: Input must be a pandas DataFrame.")
+        return None
+        
+    if rows_to_skip < 0:
+        print("Error: rows_to_skip must be a non-negative integer.")
+        return None
+        
+    if rows_to_skip >= len(df):
+        print(f"Warning: Attempted to skip {rows_to_skip} rows in a DataFrame with only {len(df)} rows (excluding header).")
+        # Return an empty DataFrame with the original columns
+        return pd.DataFrame(columns=df.columns)
+
+    try:
+        # We use .iloc[] for integer-location based slicing.
+        # [rows_to_skip:] means "Start the new DataFrame from the row 
+        # that comes AFTER the specified number of rows, and go to the end."
+        # The column names (header) are automatically retained.
+        df_modified = df.iloc[rows_to_skip:]
+        
+        print(f"Successfully removed the first {rows_to_skip} data rows.")
+        return df_modified
+
+    except Exception as e:
+        print(f"An unexpected error occurred: {e}")
+        return None
+
+def extract_column_to_numpy(df: pd.DataFrame, column_name: str) -> np.ndarray:
+    """
+    Extracts a specified column from a pandas DataFrame and converts it 
+    into a NumPy array.
+
+    Args:
+        df (pd.DataFrame): The input DataFrame that has already been loaded.
+        column_name (str): The name of the column to be extracted.
     
-    df = sales_df.copy()
-    df['date'] = pd.to_datetime(df['date'])
+    Returns:
+        np.ndarray: A 1-dimensional NumPy array containing the data 
+                    from the specified column. Returns None if the column is not found.
+    """
+    if not isinstance(df, pd.DataFrame):
+        print("Error: Input must be a pandas DataFrame.")
+        return None
 
-    # Define the target period to be replaced
-    start_date = pd.to_datetime(start_date_str)
-    end_date = start_date + pd.Timedelta(days=length_days - 1)
+    if column_name not in df.columns:
+        print(f"Error: Column '{column_name}' not found in the DataFrame.")
+        return None
     
-    # Define the source period to copy from
-    source_start_date = start_date.replace(year=source_year)
-    source_end_date = end_date.replace(year=source_year)
+    try:
+        # 1. Select the column (returns a pandas Series)
+        column_series = df[column_name]
+        
+        # 2. Convert the pandas Series to a NumPy array
+        # .to_numpy() is the modern and preferred method for conversion.
+        numpy_array = column_series.to_numpy()
+        
+        print(f"Successfully extracted column '{column_name}' and converted it to a NumPy array.")
+        print(f"Resulting array shape: {numpy_array.shape}")
+        
+        return numpy_array
+
+    except Exception as e:
+        print(f"An unexpected error occurred during conversion: {e}")
+        return None
+
+def cut_first_column_to_numpy(df: pd.DataFrame) -> np.ndarray:
+    """
+    Removes the first column from a pandas DataFrame and converts the 
+    removed column into a 1D NumPy array.
     
-    # 1. Select the source data using a boolean mask
-    source_mask = (df['date'] >= source_start_date) & (df['date'] <= source_end_date)
-    source_data = df[source_mask].copy()
+    NOTE: This function modifies the input DataFrame in-place (cuts the column).
 
-    # Check if the source data is empty
-    if source_data.empty:
-        print(f"Error: No data found for the source period between {source_start_date.date()} and {source_end_date.date()}. No changes were made.")
-        return sales_df
-
-    # 2. Calculate the time difference and shift the dates in the source data (fast vectorized operation)
-    time_delta = start_date - source_start_date
-    source_data['date'] = source_data['date'] + time_delta
-
-    # 3. Create a mask for the target period to be removed from the original dataframe
-    target_mask = (df['date'] >= start_date) & (df['date'] <= end_date)
-
-    # 4. Combine the original data (excluding the target period) with the new source data
-    result_df = pd.concat([df[~target_mask], source_data], ignore_index=True)
-
-    # 5. Sort the final dataframe by date to restore the correct order
-    result_df.sort_values(by='date', inplace=True)
-
-    print(f"Successfully replaced data from {start_date.date()} to {end_date.date()} with data from {source_year}.")
+    Args:
+        df (pd.DataFrame): The input DataFrame.
     
-    return result_df
+    Returns:
+        np.ndarray: A 1-dimensional NumPy array of the data from the 
+                    removed first column. Returns None if the DataFrame 
+                    is empty or invalid.
+    """
+    if not isinstance(df, pd.DataFrame) or df.empty:
+        print("Error: Input is not a valid or non-empty pandas DataFrame.")
+        return None
+
+    try:
+        # 1. Get the column name for printing/checking
+        first_column_name = df.columns[0]
+        
+        # 2. Use .pop() to remove the column AND return it as a pandas Series
+        # df.pop() is the method that performs the "cut" and modifies the df in-place.
+        removed_series = df.pop(first_column_name)
+        
+        # 3. Convert the pandas Series to a NumPy array
+        numpy_array = removed_series.to_numpy()
+        
+        print(f"Successfully cut column '{first_column_name}' from DataFrame.")
+        print(f"The modified DataFrame now has {df.shape[1]} columns.")
+        
+        return numpy_array
+
+    except Exception as e:
+        print(f"An unexpected error occurred: {e}")
+        return None
 
 def train_val_split(time, series):
     """ Splits time series into train and validations sets"""
@@ -467,31 +533,6 @@ def generate_sales_dashboard(sales_df, events_df=None, output_filename="sales_da
     except IOError as e:
         print(f"Error saving chart: {e}")
 
-def group_sales_by_family(sales_df):
-    """
-    Groups a sales DataFrame by the 'family' column and returns a list 
-    of DataFrames, one for each product family.
-
-    Args:
-        sales_df (pd.DataFrame): The input DataFrame containing sales data
-                                 with a 'family' column.
-
-    Returns:
-        list: A list of pandas DataFrames, where each DataFrame contains 
-              the data for a single product family.
-    """
-    
-    # Use the .groupby() method to create a grouping object
-    grouped = sales_df.groupby('family')
-    
-    # Use a list comprehension to create a list of DataFrames from the groups.
-    # The 'group' variable in the loop is the actual DataFrame for each family.
-    # The 'name' variable (which we ignore with '_') is the family name (e.g., 'AUTOMOTIVE').
-    list_of_dfs = [group for _, group in grouped]
-    
-    print(f"Successfully grouped the data into {len(list_of_dfs)} separate DataFrames.")
-    
-    return list_of_dfs
 
 def windowed_dataset(series, window_size):
     """Creates windowed dataset"""
@@ -758,50 +799,32 @@ if __name__ == '__main__':
 
         #print_data_head(dataset_csv, num_rows=20, column_name='Sunspots_WMA')
 
+        dataset_csv = delete_first_x_data_rows(dataset_csv, rows_to_skip=7)
+
         save_all_data_to_csv_in_folder(dataset_csv, filename="Sunspots_Processed_WMA.csv", index_name='Date')
 
-        exit()
-        
-        # Read the data from CSV files once
-        data_train, _ = read_data_from_csv(TRAIN_DATA_CSV_PATH, is_training_data=True)
-        features_test = read_data_from_csv(TEST_DATA_CSV_PATH, is_training_data=False)
+        sun_spot_timeseries = extract_column_to_numpy(dataset_csv, column_name = 'Number of Sunspots filled')
+        time_timeseries = cut_first_column_to_numpy(dataset_csv)
 
-        print_data_head(data_train)
+        print("sun_spot_timeseries")
+        print(sun_spot_timeseries[0:5])
+        print("time_timeseries")
+        print(time_timeseries[0:5])
 
-        # Print the train data
-        generate_sales_dashboard(data_train,  output_filename="ecuador_sales_dashboard.html")
+        print("train_val_split")
+        time_train, features_train, time_valid, features_valid = train_val_split(time_timeseries, sun_spot_timeseries)
+        features_train = features_train.astype('float32')
+        features_valid = features_valid.astype('float32')
 
-        # A magnitude 7.8 earthquake struck Ecuador on April 16, 2016. People rallied in relief efforts donating water and other first need products which greatly affected supermarket sales for several weeks after the earthquake
-        data_train_wo_earthquake = replace_yearly_data(
-            sales_df=data_train, 
-            start_date_str="2016-04-16", 
-            length_days=30, 
-            source_year=2017
-        )
-        events_data = [
-            {'date': '2016-04-16', 'description': 'earthquake struck'},
-        ]
-        events_df = pd.DataFrame(events_data)
-        generate_sales_dashboard(data_train_wo_earthquake, events_df=events_df,  output_filename="ecuador_sales_dashboard_wo_earthquake.html")
-
-        families = data_train_wo_earthquake['family'].unique()
-        print(families)
-
-        grouped_by_family = group_sales_by_family(data_train_wo_earthquake)
-        print(grouped_by_family[0].head(20))
-
-        exit()
-
-        #drop header
-        data_train_wo_earthquake = data_train_wo_earthquake[1:]
-
-        time_train, features_train, time_valid, features_valid = train_val_split(data_train_wo_earthquake['date'], data_train_wo_earthquake['sales'])
-
+        print("windowed_dataset")
         train_dataset = windowed_dataset(features_train, window_size=hparams['WINDOW_SIZE'])
 
         #learning rate optimization
+        print("learning rate optimization")
         lr_history = adjust_learning_rate(train_dataset)
         plt.semilogx(lr_history.history["learning_rate"], lr_history.history["loss"])
+
+        exit()
 
         uncompiled_model = create_uncompiled_model_wo_antioverfitting()
         uncompiled_model.summary()
