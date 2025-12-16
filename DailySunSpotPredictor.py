@@ -14,7 +14,7 @@ import shutil
 
 hparams = {
     # Dataset preprocessing
-    "TRAINING_SPLIT": 0.9,
+    #"TRAINING_SPLIT": 0.9,
     "BATCH_SIZE": 256,
     "SHUFFLE_BUFFER_SIZE": 1000,
     "SPLIT_TIME": 0.9,
@@ -46,9 +46,7 @@ hparams = {
 
 def download_dataset():
 
-    # --- Your initial download code ---
     path_to_download_folder = kagglehub.dataset_download("abhinand05/daily-sun-spot-data-1818-to-2019")
-    # --- End of initial download code ---
 
     print(f"\n--- Debugging: Contents of the Download Folder ---")
     print(f"Directory path: {path_to_download_folder}")
@@ -87,56 +85,6 @@ def convert_missing_observations_format(df):
     # Optional: Check how many missing values you have now
     print(f"Total NaN values after conversion: {df['Number of Sunspots'].isna().sum()}")
 
-def weighted_mean_triangular(data):
-    """
-    Calculates the Triangular Weighted Mean for a given window of data.
-    Weights are highest in the center of the data window, prioritizing points
-    closest to the imputation target.
-    """
-    # 1. Filter out NaNs
-    data_cleaned = data.dropna()
-    n = len(data_cleaned)
-    
-    if n == 0:
-        return np.nan
-    
-    # 2. Create Triangular Weights
-    # If n is 5, weights are [1, 2, 3, 2, 1]
-    # If n is 6, weights are [1, 2, 3, 3, 2, 1] (or [1, 2, 3, 4, 3, 2] depending on definition, 
-    # but the simple symmetric one is best here)
-    
-    # Determine the midpoint and create weights
-    mid = n // 2
-    
-    # Weights for the first half (e.g., [1, 2])
-    weights_first_half = np.arange(1, mid + 1)
-    
-    # Weights for the second half (in reverse order, e.g., [2, 1] for n=5)
-    weights_second_half = np.arange(mid, 0, -1)
-    
-    if n % 2 != 0:
-        # Odd length (e.g., n=5). Midpoint is unique and highest (e.g., [1, 2, 3] + [2, 1])
-        weights = np.concatenate([weights_first_half, [mid + 1], weights_second_half])
-    else:
-        # Even length (e.g., n=6). Two middle points share the high weight.
-        # Simple symmetric weights: [1, 2, 3, 3, 2, 1]
-        weights = np.concatenate([weights_first_half, weights_first_half[::-1]])
-        
-    # Check that weights array matches the length of the cleaned data
-    if len(weights) != n:
-        # This shouldn't happen with the current logic, but a safeguard is useful
-        # Let's adjust for the simplest symmetric case
-        weights = np.concatenate([np.arange(1, mid + 1), np.arange(mid, 0, -1)])
-        if len(weights) != n:
-             # Fall back to linear if complexity is too high, but let's stick to the triangular goal
-             pass # The previous logic should handle most practical cases for centered windows
-             
-    # 3. Calculate Weighted Average
-    weighted_sum = np.sum(data_cleaned * weights)
-    sum_of_weights = np.sum(weights)
-    
-    return weighted_sum / sum_of_weights
-
 def calculate_rolling_exponential_average(data_series, span_size, adjust_mode=False):
     """
     Calculates the Exponential Weighted Moving Average (EWMA) for a pandas Series.
@@ -171,10 +119,10 @@ def fill_missing_datapoints(df, target_column='Number of Sunspots'):
     """
     SPAN_SIZE=5
 
-    # 1. Convert Sentinel Value (-1) to Standard Missing Value (NaN)
+    # Convert Sentinel Value (-1) to Standard Missing Value (NaN)
     df[target_column] = df[target_column].replace(-1, np.nan)
     
-    # --- 2. Calculate the Central Exponential Moving Average (CEMA) ---
+    # Calculate the Central Exponential Moving Average (CEMA) 
     
     # Forward EMA
     ema_forward = df[target_column].ewm(span=SPAN_SIZE, adjust=False, min_periods=1).mean()
@@ -185,15 +133,15 @@ def fill_missing_datapoints(df, target_column='Number of Sunspots'):
     # Central EMA (The imputation values)
     df['Sunspots_CEMA'] = (ema_forward + ema_backward) / 2
     
-    # 3. Imputation and Final Type Conversion
+    # Imputation and Final Type Conversion
     
-    # a) Impute using CEMA and round to the nearest whole number.
+    # Impute using CEMA and round to the nearest whole number.
     imputed_series = df[target_column].fillna(df['Sunspots_CEMA']).round(0)
     
-    # b) Use .astype('Int64') to allow NaNs to exist in the integer column.
+    # Use .astype('Int64') to allow NaNs to exist in the integer column.
     df['Number of Sunspots filled'] = imputed_series.astype('Int64') 
     
-    # 4. Final verification and cleanup
+    # Final verification and cleanup
     nan_count_before = df[target_column].isna().sum()
     # Check the final column for any remaining NaNs (should be very few, only for large initial/final gaps)
     nan_count_after = df['Number of Sunspots filled'].isna().sum()
@@ -222,10 +170,10 @@ def save_all_data_to_csv_in_folder(df, folder_name="dataset", filename="Sunspots
         str: The full path to the saved file, or None on failure.
     """
     
-    # 1. Create the full file path: 'dataset/Sunspots_Processed_WMA.csv'
+    # Create the full file path: 'dataset/Sunspots_Processed_WMA.csv'
     full_file_path = os.path.join(folder_name, filename)
     
-    # 2. Check if the folder exists, and create it if it doesn't
+    # Check if the folder exists, and create it if it doesn't
     # 'exist_ok=True' prevents an error if the folder is already there
     os.makedirs(folder_name, exist_ok=True)
     
@@ -233,7 +181,7 @@ def save_all_data_to_csv_in_folder(df, folder_name="dataset", filename="Sunspots
     if df.index.name is None:
         df.index.name = index_name
     
-    # 3. Save the entire DataFrame to the constructed path
+    # Save the entire DataFrame to the constructed path
     try:
         df.to_csv(full_file_path, index=True)
         
@@ -269,7 +217,7 @@ def print_data_head(*data, num_rows=5, column_name=None):
         
         if column_name is not None and isinstance(df_or_series, pd.DataFrame):
             try:
-                # 1. Select only the requested column
+                # Select only the requested column
                 data_to_print = df_or_series[[column_name]]
                 print(f"(Column: '{column_name}')")
             except KeyError:
@@ -277,25 +225,22 @@ def print_data_head(*data, num_rows=5, column_name=None):
                 # Fallback to printing the full head if the column is not found
                 data_to_print = df_or_series
         else:
-            # 2. Print the full DataFrame/Series head
+            # Print the full DataFrame/Series head
             data_to_print = df_or_series
             
         print(data_to_print.head(num_rows))
 
 
     if len(data) == 2:
-        # Case 1: Features and Target
         features, target = data
         display_data("features", features)
         display_data("target", target)
         
     elif len(data) == 1:
-        # Case 2: Single DataFrame/Series
         features = data[0]
         display_data("data", features)
         
     else:
-        # Case 3: Invalid arguments
         print("Invalid number of arguments passed to print_data_head.")
         
     print("-" * 50)
@@ -328,10 +273,6 @@ def delete_first_x_data_rows(df, rows_to_skip):
         return pd.DataFrame(columns=df.columns)
 
     try:
-        # We use .iloc[] for integer-location based slicing.
-        # [rows_to_skip:] means "Start the new DataFrame from the row 
-        # that comes AFTER the specified number of rows, and go to the end."
-        # The column names (header) are automatically retained.
         df_modified = df.iloc[rows_to_skip:]
         
         print(f"Successfully removed the first {rows_to_skip} data rows.")
@@ -363,10 +304,10 @@ def extract_column_to_numpy(df: pd.DataFrame, column_name: str) -> np.ndarray:
         return None
     
     try:
-        # 1. Select the column (returns a pandas Series)
+        # Select the column (returns a pandas Series)
         column_series = df[column_name]
         
-        # 2. Convert the pandas Series to a NumPy array
+        # Convert the pandas Series to a NumPy array
         # .to_numpy() is the modern and preferred method for conversion.
         numpy_array = column_series.to_numpy()
         
@@ -399,14 +340,14 @@ def cut_first_column_to_numpy(df: pd.DataFrame) -> np.ndarray:
         return None
 
     try:
-        # 1. Get the column name for printing/checking
+        # Get the column name for printing/checking
         first_column_name = df.columns[0]
         
-        # 2. Use .pop() to remove the column AND return it as a pandas Series
+        # Use .pop() to remove the column AND return it as a pandas Series
         # df.pop() is the method that performs the "cut" and modifies the df in-place.
         removed_series = df.pop(first_column_name)
         
-        # 3. Convert the pandas Series to a NumPy array
+        # Convert the pandas Series to a NumPy array
         numpy_array = removed_series.to_numpy()
         
         print(f"Successfully cut column '{first_column_name}' from DataFrame.")
@@ -683,7 +624,7 @@ def plot_training_charts(training_history, json_log_path, output_filename):
     history_dict = training_history.history
     serializable_history = {key: [float(value) for value in values] for key, values in history_dict.items()}
 
-    # --- 1. Save the history dictionary to a JSON file ---
+    # Save the history dictionary to a JSON file
     print(f"Saving training history log to {json_log_path}...")
     try:
         with open(json_log_path, 'w') as f:
@@ -692,7 +633,7 @@ def plot_training_charts(training_history, json_log_path, output_filename):
     except IOError as e:
         print(f"Error saving history log: {e}")
 
-    # --- 2. Create the interactive plot ---
+    # Create the interactive plot
     print(f"\nVisualizing training history and saving to {output_filename}...")
     
     if not history_dict or 'loss' not in history_dict or 'accuracy' not in history_dict:
@@ -702,7 +643,7 @@ def plot_training_charts(training_history, json_log_path, output_filename):
     fig = make_subplots(rows=1, cols=2, subplot_titles=('Model Loss', 'Model Accuracy'))
     epochs = list(range(1, len(history_dict['loss']) + 1))
 
-    # --- Plot Loss (Training vs. Validation) ---
+    # Plot Loss (Training vs. Validation)
     min_loss = min(history_dict['loss'])
     fig.add_trace(go.Scatter(
         x=epochs, 
@@ -720,7 +661,7 @@ def plot_training_charts(training_history, json_log_path, output_filename):
             mode='lines'
         ), row=1, col=1)
 
-    # --- Plot Accuracy (Training vs. Validation) ---
+    # Plot Accuracy (Training vs. Validation)
     max_accuracy = max(history_dict['accuracy'])
     fig.add_trace(go.Scatter(
         x=epochs, 
@@ -738,7 +679,7 @@ def plot_training_charts(training_history, json_log_path, output_filename):
             mode='lines'
         ), row=1, col=2)
 
-    # --- Update layout, titles, and legend ---
+    # Update layout, titles, and legend
     fig.update_layout(
         title_text="Model Training History",
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
@@ -748,7 +689,7 @@ def plot_training_charts(training_history, json_log_path, output_filename):
     fig.update_yaxes(title_text="Loss", row=1, col=1)
     fig.update_yaxes(title_text="Accuracy", row=1, col=2)
 
-    # --- 3. Save the figure to an HTML file ---
+    # Save the figure to an HTML file
     try:
         fig.write_html(output_filename)
         print(f"Interactive chart saved successfully to {output_filename}")
@@ -783,70 +724,79 @@ def save_predictions_to_csv(predictions, ids, output_path):
 
 def plot_training_histories(histories, filename="training_progress.html"):
     """
-    Plots the loss and MAE progress from multiple training histories 
-    into a single interactive HTML file with two subplots.
+    Plots Training vs Validation Loss and MAE from multiple histories 
+    into a 2x2 interactive HTML grid.
     """
-    # Create a figure with 1 row and 2 columns
+    # Create a figure with 2 rows and 2 columns
     fig = make_subplots(
-        rows=1, cols=2, 
-        subplot_titles=('Model Loss (Training)', 'Model MAE (Training)'),
+        rows=2, cols=2, 
+        subplot_titles=(
+            'Model Loss (Training)', 'Model MAE (Training)',
+            'Model Loss (Validation)', 'Model MAE (Validation)'
+        ),
+        vertical_spacing=0.12,
         horizontal_spacing=0.1
     )
 
-    # Use a color palette to keep colors consistent between the two charts for each model
-    colors = ['#636EFA', '#EF553B', '#00CC96', '#AB63FA', '#FFA15A']
+    # Consistent color palette
+    colors = ['#636EFA', '#EF553B', '#00CC96', '#AB63FA', '#FFA15A', '#19D3F3']
 
     for i, history in enumerate(histories):
         # Extract data dictionary
         h_dict = history.history if hasattr(history, 'history') else history
         
-        loss_values = h_dict.get('loss', [])
-        mae_values = h_dict.get('mae', [])
-        epochs = list(range(1, len(loss_values) + 1))
+        # Get metrics (using .get to avoid errors if a key is missing)
+        loss = h_dict.get('loss', [])
+        mae = h_dict.get('mae', [])
+        val_loss = h_dict.get('val_loss', [])
+        val_mae = h_dict.get('val_mae', [])
         
+        epochs = list(range(1, len(loss) + 1))
         color = colors[i % len(colors)]
+        
+        # Helper to simplify adding traces
+        def add_trace(data, name, row, col, show_legend=False):
+            if data:
+                fig.add_trace(
+                    go.Scatter(
+                        x=epochs, y=data,
+                        mode='lines',
+                        name=name,
+                        line=dict(color=color),
+                        legendgroup=f'group{i}',
+                        showlegend=show_legend,
+                        hovertemplate='Epoch: %{x}<br>Value: %{y:.4f}'
+                    ),
+                    row=row, col=col
+                )
 
-        # 1. Add Loss Trace (Column 1)
-        fig.add_trace(
-            go.Scatter(
-                x=epochs, y=loss_values,
-                mode='lines',
-                name=f'Model {i+1} Loss',
-                line=dict(color=color),
-                legendgroup=f'group{i}', # Groups legend items so they highlight together
-                hovertemplate='Epoch: %{x}<br>Loss: %{y:.4f}'
-            ),
-            row=1, col=1
-        )
+        # Row 1: Training Metrics
+        add_trace(loss, f'Model {i+1}', 1, 1, show_legend=True)
+        add_trace(mae, f'Model {i+1} MAE', 1, 2)
 
-        # 2. Add MAE Trace (Column 2)
-        fig.add_trace(
-            go.Scatter(
-                x=epochs, y=mae_values,
-                mode='lines',
-                name=f'Model {i+1} MAE',
-                line=dict(color=color),
-                legendgroup=f'group{i}',
-                showlegend=False, # Hide second legend entry to keep it clean
-                hovertemplate='Epoch: %{x}<br>MAE: %{y:.4f}'
-            ),
-            row=1, col=2
-        )
+        # Row 2: Validation Metrics
+        add_trace(val_loss, f'Model {i+1} Val Loss', 2, 1)
+        add_trace(val_mae, f'Model {i+1} Val MAE', 2, 2)
 
     # Configure layout
     fig.update_layout(
-        title='Multi-Model Training Performance Comparison',
+        title='Multi-Model Training vs Validation Performance',
         template='plotly_white',
         hovermode='x unified',
-        height=500, # Adjust height for side-by-side view
-        legend_title='Training Runs'
+        height=800,  # Increased height for 2 rows
+        legend_title='Models (Click to toggle)'
     )
 
-    fig.update_xaxes(title_text='Epochs')
-    fig.update_yaxes(title_text='Loss Value', row=1, col=1)
-    fig.update_yaxes(title_text='MAE Value', row=1, col=2)
+    # Label Axes
+    fig.update_xaxes(title_text='Epochs', row=2, col=1)
+    fig.update_xaxes(title_text='Epochs', row=2, col=2)
+    
+    fig.update_yaxes(title_text='Loss', row=1, col=1)
+    fig.update_yaxes(title_text='MAE', row=1, col=2)
+    fig.update_yaxes(title_text='Val Loss', row=2, col=1)
+    fig.update_yaxes(title_text='Val MAE', row=2, col=2)
 
-    # Save as standalone HTML
+    # Save and Export
     fig.write_html(filename)
     print(f"✅ Interactive comparison chart saved to {filename}")
 
@@ -894,7 +844,6 @@ if __name__ == '__main__':
 
         print()
 
-
         print(f"Create and compile model")
         nn_model_0 = create_uncompiled_model()
         nn_model_1 = create_uncompiled_model()
@@ -932,7 +881,7 @@ if __name__ == '__main__':
                                                 min_lr=hparams['REDUCE_LR_MIN_LR'],
                                                 #**kwargs
                                             )
-
+        print("Training model n.1")
         training_history_0 = nn_model_0.fit(x=train_dataset_final,
                                         #y=None,
                                         #batch_size=None,
@@ -950,6 +899,7 @@ if __name__ == '__main__':
                                         #validation_batch_size=None,
                                         #validation_freq=1
                                         ) 
+        print("Training model n.2")
         training_history_1 = nn_model_1.fit(x=train_dataset_final,
                                         #y=None,
                                         #batch_size=None,
@@ -967,6 +917,7 @@ if __name__ == '__main__':
                                         #validation_batch_size=None,
                                         #validation_freq=1
                                         ) 
+        print("Training model n.3")
         training_history_2 = nn_model_2.fit(x=train_dataset_final,
                                         #y=None,
                                         #batch_size=None,
@@ -984,6 +935,7 @@ if __name__ == '__main__':
                                         #validation_batch_size=None,
                                         #validation_freq=1
                                         ) 
+        print("Training model n.4")
         training_history_3 = nn_model_3.fit(x=train_dataset_final,
                                         #y=None,
                                         #batch_size=None,
@@ -1001,6 +953,7 @@ if __name__ == '__main__':
                                         #validation_batch_size=None,
                                         #validation_freq=1
                                         ) 
+        print("Training model n.5")
         training_history_4 = nn_model_4.fit(x=train_dataset_final,
                                         #y=None,
                                         #batch_size=None,
@@ -1018,6 +971,7 @@ if __name__ == '__main__':
                                         #validation_batch_size=None,
                                         #validation_freq=1
                                         ) 
+        print("Training model n.6")
         training_history_5 = nn_model_5.fit(x=train_dataset_final,
                                         #y=None,
                                         #batch_size=None,
