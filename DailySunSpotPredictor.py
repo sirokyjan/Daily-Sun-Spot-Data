@@ -13,19 +13,16 @@ import kagglehub
 import shutil
 
 hparams = {
-    # Task specific constants
-    "TASK_PROP__NUM_CLASSES": 3,
-
     # Dataset preprocessing
     "TRAINING_SPLIT": 0.9,
-    "BATCH_SIZE": 16,
+    "BATCH_SIZE": 256,
     "SHUFFLE_BUFFER_SIZE": 1000,
     "SPLIT_TIME": 0.9,
     "WINDOW_SIZE": 20,
 
     # Model params
     "OPTIMIZER_TYPE": 'adam',
-    "LOSS_FUNCTION": 'sparse_categorical_crossentropy',
+    "LOSS_FUNCTION": 'mae',
     "CONV_FILTERS_1": 32,
     "CONV_KERNEL_1": 5,
     "CONV_UNITS_1": 16,
@@ -545,7 +542,7 @@ def windowed_dataset(series, window_size):
     dataset = dataset.batch(hparams['BATCH_SIZE']).prefetch(1)
     return dataset
 
-def create_uncompiled_model_wo_antioverfitting():
+def create_uncompiled_model():
     """Define uncompiled model
 
     Returns:
@@ -557,117 +554,47 @@ def create_uncompiled_model_wo_antioverfitting():
         tf.keras.layers.Conv1D(filters=hparams['CONV_FILTERS_1'], kernel_size=hparams['CONV_KERNEL_1'], strides=1,padding="causal", activation="relu"),
         tf.keras.layers.LSTM(hparams['LSTM_UNITS_1'], return_sequences=True),
         tf.keras.layers.LSTM(hparams['LSTM_UNITS_2']),
-        tf.keras.layers.Dense(hparams['DENSE_UNITS_1'], activation="relu"), 
+        tf.keras.layers.Dense(hparams['DENSE_UNITS_1'], activation="relu"),
+        tf.keras.layers.Dropout(hparams['DROPOUT'], name='dropout_1'),
         tf.keras.layers.Dense(hparams['DENSE_UNITS_2'], activation="relu"),
+        tf.keras.layers.Dropout(hparams['DROPOUT'], name='dropout_2'),
         tf.keras.layers.Dense(1)  
         ])
-    
+
     return model
 
-def adjust_learning_rate(dataset):
-    """Fit model using different learning rates
+def compile_model(model, learning_rate):
 
-    Args:
-        dataset (tf.data.Dataset): train dataset
-
-    Returns:
-        tf.keras.callbacks.History: callback history
-    """
-
-    model = create_uncompiled_model_wo_antioverfitting()
-    
-    lr_schedule = tf.keras.callbacks.LearningRateScheduler(lambda epoch: 1e-5 * 10**(epoch / 20))
-      
-    # Select your optimizer
-    optimizer = tf.keras.optimizers.SGD(momentum=0.9)
-    
-    # Compile the model passing in the appropriate loss
-    model.compile(loss=tf.keras.losses.Huber(),
-                  optimizer=optimizer, 
-                  metrics=["mae"]) 
-
-    history = model.fit(dataset, epochs=100, callbacks=[lr_schedule])
-    
-    return history
-
-def create_and_compile_model(dense_layers, dense_units, dense_units_2, learning_rate, l2_rate, dropout_param):
-    """
-    Builds an advanced NLI model using pre-computed BERT embeddings
-    and a cross-attention mechanism.
-    """
-    # --- 1. Define the two input layers for the pre-computed embeddings ---
-    # The shape corresponds to (sequence_length, embedding_dim) from BERT
-    input_premise_embedding = tf.keras.layers.Input(shape=(128, 768), name='input_premise_embedding')
-    input_hypothesis_embedding = tf.keras.layers.Input(shape=(128, 768), name='input_hypothesis_embedding')
-
-    # --- 2. Apply Cross-Attention ---
-    # The hypothesis attends to the premise to create a context-aware representation
-    attention_layer = tf.keras.layers.MultiHeadAttention(num_heads=8, key_dim=64)
-    attended_hypothesis = attention_layer(query=input_hypothesis_embedding, value=input_premise_embedding, key=input_premise_embedding)
-
-    # --- 3. Pool the outputs to get sentence-level vectors (Symmetrical Pooling) ---
-    premise_pooled = tf.keras.layers.GlobalAveragePooling1D()(input_premise_embedding)
-    hypothesis_pooled = tf.keras.layers.GlobalAveragePooling1D()(attended_hypothesis)
-
-    # --- 4. Concatenate for the Final Classifier ---
-    concatenated = tf.keras.layers.concatenate(
-        [premise_pooled, hypothesis_pooled], name='concatenated_layer'
-    )
-
-    # --- 5. Add the Classifier (Dense Layers) ---
-    dense_1 = tf.keras.layers.Dense(dense_units, 
-                                     activation='relu', 
-                                     #kernel_initializer=kernel_initializer,
-                                     #bias_initializer=bias_initializer,
-                                     name='dense_1', 
-                                     kernel_regularizer=tf.keras.regularizers.l2(l2_rate))(concatenated)
-    dropout_1 = tf.keras.layers.Dropout(dropout_param, name='dropout_1')(dense_1)
-
-    if dense_layers>1:
-        dense_2 = tf.keras.layers.Dense(dense_units_2, 
-                                     activation='relu',
-                                     #kernel_initializer=kernel_initializer,
-                                     #bias_initializer=bias_initializer,
-                                     name='dense_2', 
-                                     kernel_regularizer=tf.keras.regularizers.l2(l2_rate))(dropout_1)
-        dropout_2 = tf.keras.layers.Dropout(dropout_param, name='dropout_2')(dense_2)
-    
-    # --- 6. Define the Final Output Layer ---
-    output = tf.keras.layers.Dense(hparams['TASK_PROP__NUM_CLASSES'], activation='softmax', name='output')(dropout_2 if dense_layers>1 else dropout_1)
-
-    # --- 7. Build and Compile the Final Model ---
-    model = tf.keras.Model(inputs=[input_premise_embedding, input_hypothesis_embedding], outputs=output)
- 
     if hparams['OPTIMIZER_TYPE'] == 'adam':
         optimizer =tf.keras.optimizers.Adam(learning_rate=learning_rate,
-                                        #beta_1=0.9,
-                                        #beta_2=0.999,
-                                        #epsilon=1e-07,
-                                        #amsgrad=False,
-                                        #weight_decay=None,
-                                        #clipnorm=None,
-                                        #clipvalue=None,
-                                        #global_clipnorm=None,
-                                        #use_ema=False,
-                                        #ema_momentum=0.99,
-                                        #ema_overwrite_frequency=None,
-                                        #loss_scale_factor=None,
-                                        #gradient_accumulation_steps=None,
-                                        name='adam',
-                                        #**kwargs
-                                    ) 
-        
+                                            #beta_1=0.9,
+                                            #beta_2=0.999,
+                                            #epsilon=1e-07,
+                                            #amsgrad=False,
+                                            #weight_decay=None,
+                                            #clipnorm=None,
+                                            #clipvalue=None,
+                                            #global_clipnorm=None,
+                                            #use_ema=False,
+                                            #ema_momentum=0.99,
+                                            #ema_overwrite_frequency=None,
+                                            #loss_scale_factor=None,
+                                            #gradient_accumulation_steps=None,
+                                            name='adam',
+                                            #**kwargs
+                                        ) 
+            
     elif hparams['OPTIMIZER_TYPE'] == 'rmsprop':
         optimizer = tf.keras.optimizers.RMSprop(learning_rate=learning_rate)
-    
+        
     else:
         print(f"Warning: Optimizer type '{hparams['OPTIMIZER_TYPE']}' not recognized. Defaulting to Adam.")
         optimizer = tf.keras.optimizers.Adam(learning_rate=learning_rate)
-    
+
     model.compile(optimizer=optimizer,
                   loss=hparams['LOSS_FUNCTION'],
                   #loss_weights=None,
-                  metrics=['accuracy'],
+                  metrics=['mae'],
                   #weighted_metrics=None,
                   #run_eagerly=False,
                   #steps_per_execution=1,
@@ -675,8 +602,72 @@ def create_and_compile_model(dense_layers, dense_units, dense_units_2, learning_
                   #auto_scale_loss=True
                   )
 
-    return model 
+    return model
+
+def plot_learningrate_loss_chart(x, y, xmin, xmax, ymin, ymax):
+
+    plt.figure(figsize=(10, 6))
+    plt.grid(True)
+    plt.axis([xmin, xmax, ymin, ymax])
+    plt.tick_params('both', length=10, width=1, which='both')
+    plt.semilogx(x, y)
+    plt.xlabel("Learning Rate (Log Scale)")
+    plt.ylabel("Loss")
+    plt.title("Learning Rate Finder")
+    plt.show()  
+
+
+def adjust_learning_rate(dataset):
+    """
+    Performs a Learning Rate Range Test on the model.
+
+    This function trains the model for a short duration while exponentially 
+    increasing the learning rate to find the optimal range.
+
+    Args:
+        dataset (tf.data.Dataset): The training dataset.
+
+    Returns:
+        tf.keras.callbacks.History: The training history containing loss vs. step data.
+    """
+
+    # Training parameters for the LR test
+    NUM_EPOCHS = 50
+    START_LR = 1e-4
+    GROWTH_DENOMINATOR = 50
+
+    model = create_uncompiled_model()
     
+    # Define exponential learning rate schedule
+    lr_schedule = tf.keras.callbacks.LearningRateScheduler(
+        lambda epoch: START_LR * 10**(epoch / GROWTH_DENOMINATOR)
+    )
+      
+    # Use SGD with momentum, common for this test
+    optimizer = tf.keras.optimizers.SGD(momentum=0.9)
+    
+    # Compile model with Huber loss (robust choice)
+    model.compile(loss=tf.keras.losses.Huber(),
+                  optimizer=optimizer, 
+                  metrics=["mae"]) 
+    
+    # Use a small, repeated dataset segment for quick testing
+    mini_dataset = dataset.repeat().take(50)
+
+    # Run the test
+    history = model.fit(mini_dataset, epochs=NUM_EPOCHS, callbacks=[lr_schedule])
+
+    # Calculate LR and Loss values for plotting
+    lrs = START_LR * (10 ** (np.arange(NUM_EPOCHS) / GROWTH_DENOMINATOR))  
+    final_lr = START_LR * (10 ** (NUM_EPOCHS / GROWTH_DENOMINATOR)) 
+    loss_data = history.history["loss"]
+    min_loss = np.min(loss_data)
+    max_loss = np.max(loss_data) 
+
+    # Plot the results
+    plot_learningrate_loss_chart(lrs, loss_data, START_LR, final_lr, min_loss * 0.9, max_loss * 1.1)
+    
+    return history
 
 def plot_training_charts(training_history, json_log_path, output_filename):
     """
@@ -789,6 +780,76 @@ def save_predictions_to_csv(predictions, ids, output_path):
     except IOError as e:
         print(f"Error saving file: {e}")
 
+
+def plot_training_histories(histories, filename="training_progress.html"):
+    """
+    Plots the loss and MAE progress from multiple training histories 
+    into a single interactive HTML file with two subplots.
+    """
+    # Create a figure with 1 row and 2 columns
+    fig = make_subplots(
+        rows=1, cols=2, 
+        subplot_titles=('Model Loss (Training)', 'Model MAE (Training)'),
+        horizontal_spacing=0.1
+    )
+
+    # Use a color palette to keep colors consistent between the two charts for each model
+    colors = ['#636EFA', '#EF553B', '#00CC96', '#AB63FA', '#FFA15A']
+
+    for i, history in enumerate(histories):
+        # Extract data dictionary
+        h_dict = history.history if hasattr(history, 'history') else history
+        
+        loss_values = h_dict.get('loss', [])
+        mae_values = h_dict.get('mae', [])
+        epochs = list(range(1, len(loss_values) + 1))
+        
+        color = colors[i % len(colors)]
+
+        # 1. Add Loss Trace (Column 1)
+        fig.add_trace(
+            go.Scatter(
+                x=epochs, y=loss_values,
+                mode='lines',
+                name=f'Model {i+1} Loss',
+                line=dict(color=color),
+                legendgroup=f'group{i}', # Groups legend items so they highlight together
+                hovertemplate='Epoch: %{x}<br>Loss: %{y:.4f}'
+            ),
+            row=1, col=1
+        )
+
+        # 2. Add MAE Trace (Column 2)
+        fig.add_trace(
+            go.Scatter(
+                x=epochs, y=mae_values,
+                mode='lines',
+                name=f'Model {i+1} MAE',
+                line=dict(color=color),
+                legendgroup=f'group{i}',
+                showlegend=False, # Hide second legend entry to keep it clean
+                hovertemplate='Epoch: %{x}<br>MAE: %{y:.4f}'
+            ),
+            row=1, col=2
+        )
+
+    # Configure layout
+    fig.update_layout(
+        title='Multi-Model Training Performance Comparison',
+        template='plotly_white',
+        hovermode='x unified',
+        height=500, # Adjust height for side-by-side view
+        legend_title='Training Runs'
+    )
+
+    fig.update_xaxes(title_text='Epochs')
+    fig.update_yaxes(title_text='Loss Value', row=1, col=1)
+    fig.update_yaxes(title_text='MAE Value', row=1, col=2)
+
+    # Save as standalone HTML
+    fig.write_html(filename)
+    print(f"✅ Interactive comparison chart saved to {filename}")
+
 if __name__ == '__main__':
 
     try:
@@ -818,47 +879,40 @@ if __name__ == '__main__':
 
         print("windowed_dataset")
         train_dataset = windowed_dataset(features_train, window_size=hparams['WINDOW_SIZE'])
+        validation_dataset = windowed_dataset(features_valid, window_size=hparams['WINDOW_SIZE'])
 
         #learning rate optimization
-        print("learning rate optimization")
-        lr_history = adjust_learning_rate(train_dataset)
-        plt.semilogx(lr_history.history["learning_rate"], lr_history.history["loss"])
-
-        exit()
-
-        uncompiled_model = create_uncompiled_model_wo_antioverfitting()
-        uncompiled_model.summary()
-    
-        print(f"Training dataset contains {len(train_dataset_csv)} examples\n")
-        print(f"Test dataset contains {len(test_dataset_raw)} examples\n")
+        #print("learning rate optimization")
+        #lr_history = adjust_learning_rate(train_dataset)
 
         SHUFFLE_BUFFER_SIZE = 1000
         PREFETCH_BUFFER_SIZE = tf.data.AUTOTUNE
-        train_dataset_final = train_dataset.cache().shuffle(SHUFFLE_BUFFER_SIZE).prefetch(PREFETCH_BUFFER_SIZE).batch(hparams['BATCH_SIZE'])
-        validation_dataset_final = validation_dataset.cache().prefetch(PREFETCH_BUFFER_SIZE).batch(hparams['BATCH_SIZE'])
+        train_dataset_final = train_dataset.cache().shuffle(SHUFFLE_BUFFER_SIZE).prefetch(PREFETCH_BUFFER_SIZE)#.batch(hparams['BATCH_SIZE'])
+        validation_dataset_final = validation_dataset.cache().prefetch(PREFETCH_BUFFER_SIZE)#.batch(hparams['BATCH_SIZE'])
 
         print(f"Buffered {SHUFFLE_BUFFER_SIZE} elements for the training dataset.")
 
         print()
 
-        print(f"There are {len(train_dataset_final)} batches for a total of {hparams['BATCH_SIZE']*len(train_dataset_final)} elements for training.\n")
-        print(f"There are {len(validation_dataset_final)} batches for a total of {hparams['BATCH_SIZE']*len(validation_dataset_final)} elements for validation.\n")
-
-        print()
 
         print(f"Create and compile model")
-        nn_model = create_and_compile_model(
-            hparams['DENSE_LAYERS'], 
-            hparams['DENSE_UNITS_1'],
-            hparams['DENSE_UNITS_2'], 
-            hparams['LEARNING_RATE'],
-            hparams['L2_REG_RATE'],
-            hparams['DROPOUT']
-        )
-        nn_model.summary()
+        nn_model_0 = create_uncompiled_model()
+        nn_model_1 = create_uncompiled_model()
+        nn_model_2 = create_uncompiled_model()
+        nn_model_3 = create_uncompiled_model()
+        nn_model_4 = create_uncompiled_model()
+        nn_model_5 = create_uncompiled_model()
+        nn_model_2.summary()
+
+        compile_model(nn_model_0, 4E-3)
+        compile_model(nn_model_1, 1E-4)
+        compile_model(nn_model_2, 2E-4)
+        compile_model(nn_model_3, 3E-4)
+        compile_model(nn_model_4, 4E-4)
+        compile_model(nn_model_5, 5E-4)
 
         early_stopping_callback = tf.keras.callbacks.EarlyStopping(
-            monitor='val_accuracy',    # Monitor the validation loss
+            monitor='val_loss',    # Monitor the validation loss
             #min_delta = 0,
             patience=hparams['EARLY_STOP_PATIENCE'],            # Stop if val_loss doesn't improve for 5 epochs
             verbose=1,
@@ -868,7 +922,7 @@ if __name__ == '__main__':
             #start_from_epoch=0
         )
 
-        learning_rate_scheduler = tf.keras.callbacks.ReduceLROnPlateau(   monitor='val_accuracy',
+        learning_rate_scheduler = tf.keras.callbacks.ReduceLROnPlateau(   monitor='val_loss',
                                                 factor=hparams['REDUCE_LR_FACTOR'],
                                                 patience=hparams['REDUCE_LR_PATIENCE'],
                                                 verbose=1,
@@ -879,12 +933,97 @@ if __name__ == '__main__':
                                                 #**kwargs
                                             )
 
-        training_history = nn_model.fit(x=train_dataset_final,
+        training_history_0 = nn_model_0.fit(x=train_dataset_final,
                                         #y=None,
                                         #batch_size=None,
                                         epochs=hparams['EPOCHS'],
                                         #verbose='auto',
-                                        callbacks=[early_stopping_callback, learning_rate_scheduler],
+                                        #callbacks=[early_stopping_callback, learning_rate_scheduler],
+                                        #validation_split=0.0,
+                                        validation_data=validation_dataset_final,
+                                        #shuffle=True,
+                                        #class_weight=None,
+                                        #sample_weight=None,
+                                        #initial_epoch=0,
+                                        #steps_per_epoch=None,
+                                        #validation_steps=None,
+                                        #validation_batch_size=None,
+                                        #validation_freq=1
+                                        ) 
+        training_history_1 = nn_model_1.fit(x=train_dataset_final,
+                                        #y=None,
+                                        #batch_size=None,
+                                        epochs=hparams['EPOCHS'],
+                                        #verbose='auto',
+                                        #callbacks=[early_stopping_callback, learning_rate_scheduler],
+                                        #validation_split=0.0,
+                                        validation_data=validation_dataset_final,
+                                        #shuffle=True,
+                                        #class_weight=None,
+                                        #sample_weight=None,
+                                        #initial_epoch=0,
+                                        #steps_per_epoch=None,
+                                        #validation_steps=None,
+                                        #validation_batch_size=None,
+                                        #validation_freq=1
+                                        ) 
+        training_history_2 = nn_model_2.fit(x=train_dataset_final,
+                                        #y=None,
+                                        #batch_size=None,
+                                        epochs=hparams['EPOCHS'],
+                                        #verbose='auto',
+                                        #callbacks=[early_stopping_callback, learning_rate_scheduler],
+                                        #validation_split=0.0,
+                                        validation_data=validation_dataset_final,
+                                        #shuffle=True,
+                                        #class_weight=None,
+                                        #sample_weight=None,
+                                        #initial_epoch=0,
+                                        #steps_per_epoch=None,
+                                        #validation_steps=None,
+                                        #validation_batch_size=None,
+                                        #validation_freq=1
+                                        ) 
+        training_history_3 = nn_model_3.fit(x=train_dataset_final,
+                                        #y=None,
+                                        #batch_size=None,
+                                        epochs=hparams['EPOCHS'],
+                                        #verbose='auto',
+                                        #callbacks=[early_stopping_callback, learning_rate_scheduler],
+                                        #validation_split=0.0,
+                                        validation_data=validation_dataset_final,
+                                        #shuffle=True,
+                                        #class_weight=None,
+                                        #sample_weight=None,
+                                        #initial_epoch=0,
+                                        #steps_per_epoch=None,
+                                        #validation_steps=None,
+                                        #validation_batch_size=None,
+                                        #validation_freq=1
+                                        ) 
+        training_history_4 = nn_model_4.fit(x=train_dataset_final,
+                                        #y=None,
+                                        #batch_size=None,
+                                        epochs=hparams['EPOCHS'],
+                                        #verbose='auto',
+                                        #callbacks=[early_stopping_callback, learning_rate_scheduler],
+                                        #validation_split=0.0,
+                                        validation_data=validation_dataset_final,
+                                        #shuffle=True,
+                                        #class_weight=None,
+                                        #sample_weight=None,
+                                        #initial_epoch=0,
+                                        #steps_per_epoch=None,
+                                        #validation_steps=None,
+                                        #validation_batch_size=None,
+                                        #validation_freq=1
+                                        ) 
+        training_history_5 = nn_model_5.fit(x=train_dataset_final,
+                                        #y=None,
+                                        #batch_size=None,
+                                        epochs=hparams['EPOCHS'],
+                                        #verbose='auto',
+                                        #callbacks=[early_stopping_callback, learning_rate_scheduler],
                                         #validation_split=0.0,
                                         validation_data=validation_dataset_final,
                                         #shuffle=True,
@@ -898,6 +1037,10 @@ if __name__ == '__main__':
                                         ) 
         
         print()
+
+        plot_training_histories([training_history_0, training_history_1, training_history_2, training_history_3, training_history_4, training_history_5])
+
+        exit()
 
         history_log_path = os.path.join(current_dir, "training_history.json")
         loss_acc_chart_path = os.path.join(current_dir, "training_loss_acc_chart.html")
