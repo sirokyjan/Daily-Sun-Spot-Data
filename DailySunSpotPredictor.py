@@ -1,47 +1,54 @@
-import pickle
+import loss_functions as MyLossLib
 import pandas as pd
 import numpy as np
 import tensorflow as tf
 import matplotlib.pyplot as plt
-import tensorflow_hub as hub
-import tensorflow_text as text
 import os
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import json
 import kagglehub
 import shutil
+from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
+
+LR_FINDER = 1
+LR_FINDER_TEST = 0
+LOSS_FNC_TEST = 1
 
 hparams = {
     # Dataset preprocessing
     #"TRAINING_SPLIT": 0.9,
-    "BATCH_SIZE": 256,
-    "SHUFFLE_BUFFER_SIZE": 1000,
+    "BATCH_SIZE": 1024,
+    "SHUFFLE_BUFFER_SIZE": 20000,
     "SPLIT_TIME": 0.9,
-    "WINDOW_SIZE": 20,
+    "WINDOW_SIZE": 50,
 
     # Model params
     "OPTIMIZER_TYPE": 'adam',
-    "LOSS_FUNCTION": 'mae',
+    "LOSS_FUNCTION": tf.keras.losses.Huber(),
     "CONV_FILTERS_1": 32,
-    "CONV_KERNEL_1": 5,
-    "CONV_UNITS_1": 16,
+    "CONV_KERNEL_1": 9,
     "LSTM_UNITS_1": 64,
     "LSTM_UNITS_2": 64,
     "DENSE_UNITS_1": 30,
     "DENSE_UNITS_2": 10,
     "L2_REG_RATE": 0.006,
-    "DROPOUT": 0.6,
+    "DROPOUT": 0.2,
     #"KERNEL_INITIALIZER": 'glorot_uniform', # Added weight initializer. #'he_normal'
     #"BIAS_INITIALIZER": 'zeros',         # Added bias initializer
 
+    # Learning rate finder
+    "LRF_NUM_EPOCHS": 60,
+    "LRF_START_LR": 1e-7,
+    "LRF_GROWTH_DENOMINATOR": 10,
+
     # Training
-    "LEARNING_RATE": 0.0001,
+    "LEARNING_RATE": 1e-05,
     "EARLY_STOP_PATIENCE": 10,
-    "REDUCE_LR_PATIENCE": 5,
+    "REDUCE_LR_PATIENCE": 7,
     "REDUCE_LR_FACTOR": 0.5,
     "REDUCE_LR_MIN_LR": 0.00001,
-    "EPOCHS": 100
+    "EPOCHS": 3
 }
 
 def download_dataset():
@@ -78,81 +85,35 @@ def download_dataset():
 
     return df
 
-def convert_missing_observations_format(df):
-    # Replace the sentinel value (-1) with NaN
-    df['Number of Sunspots'] = df['Number of Sunspots'].replace(-1, np.nan)
-
-    # Optional: Check how many missing values you have now
-    print(f"Total NaN values after conversion: {df['Number of Sunspots'].isna().sum()}")
-
-def calculate_rolling_exponential_average(data_series, span_size, adjust_mode=False):
-    """
-    Calculates the Exponential Weighted Moving Average (EWMA) for a pandas Series.
-    The most recent/closest values have the highest (exponentially decaying) weights.
-
-    Parameters:
-    - data_series (pd.Series): The time series data (with -1s converted to NaNs).
-    - span_size (int): The span (similar to a window size) used to calculate the decay factor alpha.
-    - adjust_mode (bool): Whether to use the standard pandas adjustment formula. 
-                          False (default) is typically preferred for imputation.
-    
-    Returns:
-    - pd.Series: A new Series containing the calculated EWMA, rounded to the nearest integer.
-    """
-    
-    # The .ewm() method handles NaNs automatically by skipping them and maintaining
-    # the weighting decay relative to the time step (not the position in the window).
-    rolling_ema = data_series.ewm(
-        span=span_size,
-        adjust=adjust_mode,
-        min_periods=1  # We use min_periods=1 to fill data quickly
-    ).mean()
-    
-    # Round the final calculated average to the nearest integer
-    return rolling_ema.round(0)
-
-def fill_missing_datapoints(df, target_column='Number of Sunspots'):
+def fill_missing_with_linear_extrapolation(df, target_column='Number of Sunspots'):
     """
     1. Converts -1 to NaN.
-    2. Calculates a central Exponential Moving Average (CEMA) for imputation.
-    3. Imputes the NaN values, then converts the result to the nullable integer type (Int64).
+    2. Fills internal gaps using linear interpolation.
+    3. Fills leading/trailing gaps using linear extrapolation based on the trend.
     """
-    SPAN_SIZE=5
-
-    # Convert Sentinel Value (-1) to Standard Missing Value (NaN)
+    # 1. Replace sentinel -1 with NaN
     df[target_column] = df[target_column].replace(-1, np.nan)
     
-    # Calculate the Central Exponential Moving Average (CEMA) 
+    # 2. Linear Interpolation (Internal Gaps)
+    # This connects two known points with a straight line.
+    df['Sunspots_Linear'] = df[target_column].interpolate(method='linear')
     
-    # Forward EMA
-    ema_forward = df[target_column].ewm(span=SPAN_SIZE, adjust=False, min_periods=1).mean()
+    # 3. Linear Extrapolation (Edges)
+    # 'limit_direction="both"' fills NaNs at the start and end of the series.
+    # 'fill_value="extrapolate"' uses the slope of the nearest points to project outward.
+    df['Sunspots_Linear'] = df['Sunspots_Linear'].interpolate(
+        method='linear', 
+        limit_direction='both', 
+        fill_value='extrapolate'
+    )
     
-    # Backward EMA
-    ema_backward = df[target_column][::-1].ewm(span=SPAN_SIZE, adjust=False, min_periods=1).mean()[::-1]
+    # 4. Cleanup: Round and ensure non-negative (sunspots can't be negative)
+    df['Number of Sunspots filled'] = df['Sunspots_Linear'].round(0).clip(lower=0)
     
-    # Central EMA (The imputation values)
-    df['Sunspots_CEMA'] = (ema_forward + ema_backward) / 2
-    
-    # Imputation and Final Type Conversion
-    
-    # Impute using CEMA and round to the nearest whole number.
-    imputed_series = df[target_column].fillna(df['Sunspots_CEMA']).round(0)
-    
-    # Use .astype('Int64') to allow NaNs to exist in the integer column.
-    df['Number of Sunspots filled'] = imputed_series.astype('Int64') 
-    
-    # Final verification and cleanup
-    nan_count_before = df[target_column].isna().sum()
-    # Check the final column for any remaining NaNs (should be very few, only for large initial/final gaps)
-    nan_count_after = df['Number of Sunspots filled'].isna().sum()
-    
-    print("\n--- Imputation Summary (Central Exponential Average Fill) ---")
-    print(f"Original NaNs in '{target_column}': {nan_count_before}")
-    print(f"Remaining NaNs in 'Number of Sunspots filled': {nan_count_after} (Allowed due to Int64 type)")
-    print(f"Data type of filled column: {df['Number of Sunspots filled'].dtype}")
-    
-    print("\n--- Data Check (CEMA Imputation) ---")
-    print(df[[target_column, 'Sunspots_CEMA', 'Number of Sunspots filled']].head(30))
+    # Statistics for verification
+    nan_count = df['Number of Sunspots filled'].isna().sum()
+    print(f"--- Linear Extrapolation Summary ---")
+    print(f"Remaining NaNs: {nan_count}")
     
     return df
 
@@ -472,15 +433,29 @@ def generate_sales_dashboard(sales_df, events_df=None, output_filename="sales_da
         print(f"Error saving chart: {e}")
 
 
-def windowed_dataset(series, window_size):
-    """Creates windowed dataset"""
+def windowed_dataset(series, window_size, shuffle=True):
     series = tf.expand_dims(series, axis=-1)
     dataset = tf.data.Dataset.from_tensor_slices(series)
+    
+    # 1. Windowing
     dataset = dataset.window(window_size + 1, shift=1, drop_remainder=True)
     dataset = dataset.flat_map(lambda window: window.batch(window_size + 1))
-    dataset = dataset.shuffle(hparams['SHUFFLE_BUFFER_SIZE'])
-    dataset = dataset.map(lambda window: (window[:-1], window[-1]))
-    dataset = dataset.batch(hparams['BATCH_SIZE']).prefetch(1)
+    
+    # 2. Cache the flattened windows (Avoids re-computing windows every epoch)
+    dataset = dataset.cache() 
+    
+    # 3. Shuffle (Done on the cached data)
+    if shuffle:
+        dataset = dataset.shuffle(hparams['SHUFFLE_BUFFER_SIZE'], reshuffle_each_iteration=True)
+    
+    # 4. Map (X, Y split)
+    dataset = dataset.map(lambda window: (window[:-1], window[-1]), 
+                          num_parallel_calls=tf.data.AUTOTUNE)
+    
+    # 5. Batch and Prefetch (THE FINAL STEP)
+    # This ensures the GPU always has a batch ready in local memory.
+    dataset = dataset.batch(hparams['BATCH_SIZE']).prefetch(tf.data.AUTOTUNE)
+    
     return dataset
 
 def create_uncompiled_model():
@@ -493,6 +468,7 @@ def create_uncompiled_model():
     model = tf.keras.models.Sequential([
         tf.keras.Input(shape=(hparams['WINDOW_SIZE'],1)),
         tf.keras.layers.Conv1D(filters=hparams['CONV_FILTERS_1'], kernel_size=hparams['CONV_KERNEL_1'], strides=1,padding="causal", activation="relu"),
+        tf.keras.layers.LayerNormalization(), # Added for stability
         tf.keras.layers.LSTM(hparams['LSTM_UNITS_1'], return_sequences=True),
         tf.keras.layers.LSTM(hparams['LSTM_UNITS_2']),
         tf.keras.layers.Dense(hparams['DENSE_UNITS_1'], activation="relu"),
@@ -504,10 +480,10 @@ def create_uncompiled_model():
 
     return model
 
-def compile_model(model, learning_rate):
+def compile_model(model):
 
     if hparams['OPTIMIZER_TYPE'] == 'adam':
-        optimizer =tf.keras.optimizers.Adam(learning_rate=learning_rate,
+        optimizer =tf.keras.optimizers.Adam(learning_rate=hparams['LEARNING_RATE'],
                                             #beta_1=0.9,
                                             #beta_2=0.999,
                                             #epsilon=1e-07,
@@ -526,20 +502,20 @@ def compile_model(model, learning_rate):
                                         ) 
             
     elif hparams['OPTIMIZER_TYPE'] == 'rmsprop':
-        optimizer = tf.keras.optimizers.RMSprop(learning_rate=learning_rate)
+        optimizer = tf.keras.optimizers.RMSprop(learning_rate=hparams['LEARNING_RATE'])
         
     else:
         print(f"Warning: Optimizer type '{hparams['OPTIMIZER_TYPE']}' not recognized. Defaulting to Adam.")
-        optimizer = tf.keras.optimizers.Adam(learning_rate=learning_rate)
+        optimizer = tf.keras.optimizers.Adam(learning_rate=hparams['LEARNING_RATE'])
 
     model.compile(optimizer=optimizer,
                   loss=hparams['LOSS_FUNCTION'],
                   #loss_weights=None,
-                  metrics=['mae'],
+                  metrics=['mae', tf.keras.metrics.RootMeanSquaredError(name='rmse')],
                   #weighted_metrics=None,
                   #run_eagerly=False,
                   #steps_per_execution=1,
-                  #jit_compile='auto',
+                  #jit_compile='auto' #dont use XLA, its incompatible with LSTM
                   #auto_scale_loss=True
                   )
 
@@ -557,6 +533,64 @@ def plot_learningrate_loss_chart(x, y, xmin, xmax, ymin, ymax):
     plt.title("Learning Rate Finder")
     plt.show()  
 
+def generate_interactive_lr_finder_chart(history, start_lr, growth_denominator, output_filename="lr_finder_chart.html"):
+    """
+    Generates a standalone interactive HTML chart from the LR Finder history.
+    
+    Args:
+        history: The Keras History object from adjust_learning_rate.
+        start_lr (float): The starting learning rate used in the schedule.
+        growth_denominator (float): The denominator used in the LR growth formula.
+        output_filename (str): The name of the HTML file to save.
+    """
+    # 1. Reconstruct Learning Rates and Extract Losses
+    losses = np.array(history.history['loss'])
+    epochs = np.arange(len(losses))
+    lrs = start_lr * (10 ** (epochs / growth_denominator))
+
+    # 2. Clean data (handle potential NaNs if the model diverged at high LRs)
+    valid_mask = np.isfinite(losses)
+    clean_lrs = lrs[valid_mask]
+    clean_losses = losses[valid_mask]
+
+    # 3. Create Plotly Figure
+    fig = go.Figure()
+
+    # Add the main loss curve
+    fig.add_trace(go.Scatter(
+        x=clean_lrs, 
+        y=clean_losses,
+        mode='lines+markers',
+        name='Training Loss',
+        line=dict(color='#1f77b4', width=2),
+        marker=dict(size=4),
+        hovertemplate='<b>Learning Rate</b>: %{x:.2e}<br><b>Loss</b>: %{y:.4f}<extra></extra>'
+    ))
+
+    # 4. Professional Formatting
+    fig.update_layout(
+        title="Learning Rate Finder Analysis",
+        xaxis_title="Learning Rate (Log Scale)",
+        yaxis_title="Loss",
+        xaxis_type="log", # Set X-axis to logarithmic
+        template="plotly_white",
+        hovermode="x unified",
+        showlegend=True,
+        height=600,
+        margin=dict(l=50, r=50, t=80, b=50)
+    )
+
+    # Add a grid for easier reading
+    fig.update_xaxes(showgrid=True, gridwidth=1, gridcolor='LightGray', minor=dict(showgrid=True))
+    fig.update_yaxes(showgrid=True, gridwidth=1, gridcolor='LightGray')
+
+    # 5. Save and Notify
+    try:
+        fig.write_html(output_filename)
+        print(f"✅ Interactive LR chart successfully saved to: {output_filename}")
+    except Exception as e:
+        print(f"❌ Failed to save LR chart: {e}")
+
 
 def adjust_learning_rate(dataset):
     """
@@ -572,20 +606,14 @@ def adjust_learning_rate(dataset):
         tf.keras.callbacks.History: The training history containing loss vs. step data.
     """
 
-    # Training parameters for the LR test
-    NUM_EPOCHS = 50
-    START_LR = 1e-4
-    GROWTH_DENOMINATOR = 50
-
     model = create_uncompiled_model()
     
     # Define exponential learning rate schedule
     lr_schedule = tf.keras.callbacks.LearningRateScheduler(
-        lambda epoch: START_LR * 10**(epoch / GROWTH_DENOMINATOR)
+        lambda epoch: hparams['LRF_START_LR'] * 10**(epoch / hparams['LRF_GROWTH_DENOMINATOR'])
     )
       
-    # Use SGD with momentum, common for this test
-    optimizer = tf.keras.optimizers.SGD(momentum=0.9)
+    optimizer = tf.keras.optimizers.Adam(learning_rate=hparams['LRF_START_LR'], global_clipnorm=1.0, epsilon=1e-5)
     
     # Compile model with Huber loss (robust choice)
     model.compile(loss=tf.keras.losses.Huber(),
@@ -593,20 +621,28 @@ def adjust_learning_rate(dataset):
                   metrics=["mae"]) 
     
     # Use a small, repeated dataset segment for quick testing
-    mini_dataset = dataset.repeat().take(50)
+    mini_dataset = dataset.take(hparams['LRF_NUM_EPOCHS']).cache().repeat()
 
     # Run the test
-    history = model.fit(mini_dataset, epochs=NUM_EPOCHS, callbacks=[lr_schedule])
+    history = model.fit(mini_dataset, epochs=hparams['LRF_NUM_EPOCHS'], steps_per_epoch=60, callbacks=[lr_schedule])
 
     # Calculate LR and Loss values for plotting
-    lrs = START_LR * (10 ** (np.arange(NUM_EPOCHS) / GROWTH_DENOMINATOR))  
-    final_lr = START_LR * (10 ** (NUM_EPOCHS / GROWTH_DENOMINATOR)) 
+    lrs = hparams['LRF_START_LR'] * (10 ** (np.arange(hparams['LRF_NUM_EPOCHS']) / hparams['LRF_GROWTH_DENOMINATOR']))  
+    final_lr = hparams['LRF_START_LR'] * (10 ** (hparams['LRF_NUM_EPOCHS'] / hparams['LRF_GROWTH_DENOMINATOR'])) 
     loss_data = history.history["loss"]
     min_loss = np.min(loss_data)
     max_loss = np.max(loss_data) 
 
     # Plot the results
-    plot_learningrate_loss_chart(lrs, loss_data, START_LR, final_lr, min_loss * 0.9, max_loss * 1.1)
+    generate_interactive_lr_finder_chart(
+                history=history, 
+                start_lr=hparams['LRF_START_LR'], 
+                growth_denominator=hparams['LRF_GROWTH_DENOMINATOR'], 
+                output_filename="LR_Finder.html"
+            )
+    smoothed_loss = pd.Series(history.history['loss']).ewm(span=10).mean()
+    plot_learningrate_loss_chart(lrs, loss_data, hparams['LRF_START_LR'], final_lr, min_loss * 0.9, max_loss * 1.1)
+    plot_learningrate_loss_chart(lrs, smoothed_loss, hparams['LRF_START_LR'], final_lr, min_loss * 0.9, max_loss * 1.1)
     
     return history
 
@@ -706,7 +742,7 @@ def save_predictions_to_csv(predictions, ids, output_path):
         output_path (str): The file path where the submission CSV will be saved.
     """
     # Get the predicted label for each prediction
-    predicted_labels = np.argmax(predictions, axis=1)
+    predicted_labels = predictions.flatten()
 
     # Create a pandas DataFrame with the specified column names
     submission_df = pd.DataFrame({
@@ -721,40 +757,90 @@ def save_predictions_to_csv(predictions, ids, output_path):
     except IOError as e:
         print(f"Error saving file: {e}")
 
+def generate_timeseries_analysis_chart(time, series, title="Sunspot Analysis", output_filename="Sunspot dataset chart.html"):
+    fig = go.Figure()
+
+    # 1. Main Trace: Daily Data
+    fig.add_trace(go.Scattergl(
+        x=time,
+        y=series,
+        mode='lines',
+        name='Daily Count',
+        line=dict(color='#1f77b4', width=0.8),
+        opacity=0.4 # Fade daily data slightly to make trends visible
+    ))
+
+    # 2. ADDED: 365-day Rolling Average (Optional but highly recommended)
+    # This helps visualize the 11-year cycle through the daily noise
+    df_temp = pd.DataFrame({'val': series}, index=pd.to_datetime(time))
+    rolling_mean = df_temp['val'].rolling(window=365, center=True).mean()
+
+    fig.add_trace(go.Scattergl(
+        x=time,
+        y=rolling_mean,
+        mode='lines',
+        name='1y Moving Avg',
+        line=dict(color='red', width=2)
+    ))
+
+    fig.update_layout(
+        title=title,
+        template="plotly_white",
+        xaxis_title="Calendar Year",
+        yaxis_title="Sunspot Number",
+        hovermode="x unified",
+        xaxis=dict(
+            type="date", # This makes 'year' buttons work correctly
+            rangeselector=dict(
+                buttons=list([
+                    dict(count=1, label="1y", step="year", stepmode="backward"),
+                    dict(count=11, label="11y Cycle", step="year", stepmode="backward"),
+                    dict(count=22, label="22y Cycle", step="year", stepmode="backward"),
+                    dict(step="all", label="All Time")
+                ])
+            ),
+            rangeslider=dict(visible=True)
+        )
+    )
+
+    fig.write_html(output_filename)
+    print(f"✅ Success: Chart saved. Daily points: {len(series)}")
+
 
 def plot_training_histories(histories, filename="training_progress.html"):
     """
-    Plots Training vs Validation Loss and MAE from multiple histories 
+    Plots Training vs Validation MAE and RMSE from multiple histories 
     into a 2x2 interactive HTML grid.
     """
-    # Create a figure with 2 rows and 2 columns
     fig = make_subplots(
         rows=2, cols=2, 
         subplot_titles=(
-            'Model Loss (Training)', 'Model MAE (Training)',
-            'Model Loss (Validation)', 'Model MAE (Validation)'
+            'Training MAE', 'Training RMSE',
+            'Validation MAE', 'Validation RMSE'
         ),
         vertical_spacing=0.12,
         horizontal_spacing=0.1
     )
 
-    # Consistent color palette
     colors = ['#636EFA', '#EF553B', '#00CC96', '#AB63FA', '#FFA15A', '#19D3F3']
 
     for i, history in enumerate(histories):
-        # Extract data dictionary
         h_dict = history.history if hasattr(history, 'history') else history
         
-        # Get metrics (using .get to avoid errors if a key is missing)
-        loss = h_dict.get('loss', [])
-        mae = h_dict.get('mae', [])
-        val_loss = h_dict.get('val_loss', [])
-        val_mae = h_dict.get('val_mae', [])
+        model_label = getattr(history, 'user_defined_name', f'Model {i+1}')
         
-        epochs = list(range(1, len(loss) + 1))
+        mae = h_dict.get('mae', [])
+        rmse = h_dict.get('rmse', [])
+        val_mae = h_dict.get('val_mae', [])
+        val_rmse = h_dict.get('val_rmse', [])
+        
+        if mae:
+            epochs = list(range(1, len(mae) + 1))
+        else:
+            continue # Skip if no data
+            
         color = colors[i % len(colors)]
         
-        # Helper to simplify adding traces
         def add_trace(data, name, row, col, show_legend=False):
             if data:
                 fig.add_trace(
@@ -765,40 +851,167 @@ def plot_training_histories(histories, filename="training_progress.html"):
                         line=dict(color=color),
                         legendgroup=f'group{i}',
                         showlegend=show_legend,
-                        hovertemplate='Epoch: %{x}<br>Value: %{y:.4f}'
+                        hovertemplate='<b>' + model_label + '</b><br>Epoch: %{x}<br>Value: %{y:.4f}'
                     ),
                     row=row, col=col
                 )
 
-        # Row 1: Training Metrics
-        add_trace(loss, f'Model {i+1}', 1, 1, show_legend=True)
-        add_trace(mae, f'Model {i+1} MAE', 1, 2)
+        # Use the specific model name in the legend
+        # We only show the legend for the first plot to avoid clutter
+        add_trace(mae, model_label, 1, 1, show_legend=True)
+        add_trace(rmse, f'{model_label} RMSE', 1, 2)
+        add_trace(val_mae, f'{model_label} Val MAE', 2, 1)
+        add_trace(val_rmse, f'{model_label} Val RMSE', 2, 2)
 
-        # Row 2: Validation Metrics
-        add_trace(val_loss, f'Model {i+1} Val Loss', 2, 1)
-        add_trace(val_mae, f'Model {i+1} Val MAE', 2, 2)
-
-    # Configure layout
     fig.update_layout(
         title='Multi-Model Training vs Validation Performance',
         template='plotly_white',
         hovermode='x unified',
-        height=800,  # Increased height for 2 rows
-        legend_title='Models (Click to toggle)'
+        height=800,
+        legend_title='Models'
     )
 
     # Label Axes
     fig.update_xaxes(title_text='Epochs', row=2, col=1)
     fig.update_xaxes(title_text='Epochs', row=2, col=2)
-    
-    fig.update_yaxes(title_text='Loss', row=1, col=1)
-    fig.update_yaxes(title_text='MAE', row=1, col=2)
-    fig.update_yaxes(title_text='Val Loss', row=2, col=1)
-    fig.update_yaxes(title_text='Val MAE', row=2, col=2)
+    fig.update_yaxes(title_text='MAE', row=1, col=1)
+    fig.update_yaxes(title_text='RMSE', row=1, col=2)
+    fig.update_yaxes(title_text='Val MAE', row=2, col=1)
+    fig.update_yaxes(title_text='Val RMSE', row=2, col=2)
 
-    # Save and Export
     fig.write_html(filename)
     print(f"✅ Interactive comparison chart saved to {filename}")
+
+def generate_model_predictions(model, series, window_size, batch_size, train_min, train_max):
+    # Ensure series is a tensor with correct shape
+    dataset = tf.data.Dataset.from_tensor_slices(series)
+    
+    # Use the cleaner batching method to avoid AutoGraph warnings
+    dataset = dataset.window(window_size, shift=1, drop_remainder=True)
+    dataset = dataset.flat_map(lambda w: w.batch(window_size))
+    dataset = dataset.batch(batch_size).prefetch(tf.data.AUTOTUNE)
+    
+    print("Generating predictions...")
+    predictions = model.predict(dataset, verbose=0)
+    
+    # Inverse Scaling
+    unscaled_predictions = predictions.flatten() * (train_max - train_min) + train_min
+    
+    # Post-processing: Sunspots are non-negative integers
+    return np.maximum(0, np.round(unscaled_predictions))
+
+def evaluate_predictions(actual, predictions, model_name):
+    """
+    Calculates various regression metrics to evaluate model performance.
+    """
+    # Mean Absolute Error (Average spot miss)
+    mae = mean_absolute_error(actual, predictions)
+    
+    # Root Mean Squared Error (Penalizes large outliers/peaks)
+    rmse = np.sqrt(mean_squared_error(actual, predictions))
+    
+    # R-Squared (Percentage of variance explained)
+    r2 = r2_score(actual, predictions)
+    
+    # sMAPE (Symmetric Mean Absolute Percentage Error)
+    # Good for time series with zeros/low values
+    smape = 100/len(actual) * np.sum(2 * np.abs(predictions - actual) / (np.abs(actual) + np.abs(predictions) + 1e-10))
+
+    return {
+        "Model": model_name,
+        "MAE": mae,
+        "RMSE": rmse,
+        "R2": r2,
+        "sMAPE": smape
+    }
+
+def generate_comparison_dashboard(time, actual_series, predictions_list, metrics_list, output_filename="Prediction_Dashboard.html"):
+    """
+    Creates an interactive Plotly chart with a performance metrics table.
+    Expects arrays that are ALREADY aligned in length.
+    """
+    # No internal window_offset slicing
+    plot_time = time
+    plot_actual = actual_series
+
+    # Create Subplots: Row 1 is the Table, Row 2 is the Chart
+    fig = make_subplots(
+        rows=2, cols=1,
+        vertical_spacing=0.15,
+        specs=[[{"type": "table"}], [{"type": "scatter"}]],
+        subplot_titles=("Model Performance Metrics", "Sunspot Forecast vs Actual")
+    )
+
+    # Add Metrics Table
+    names = [m['Model'] for m in metrics_list]
+    maes = [f"{m['MAE']:.2f}" for m in metrics_list]
+    rmses = [f"{m['RMSE']:.2f}" for m in metrics_list]
+    r2s = [f"{m['R2']:.3f}" for m in metrics_list]
+    smapes = [f"{m['sMAPE']:.2f}%" for m in metrics_list]
+
+    fig.add_trace(
+        go.Table(
+            header=dict(values=['<b>Model</b>', '<b>MAE</b>', '<b>RMSE</b>', '<b>R2 Score</b>', '<b>sMAPE</b>'],
+                        fill_color='royalblue', font=dict(color='white', size=12), align='left'),
+            cells=dict(values=[names, maes, rmses, r2s, smapes],
+                       fill_color='lavender', align='left')
+        ),
+        row=1, col=1
+    )
+
+    # Add Actual Data Trace
+    fig.add_trace(
+        go.Scatter(x=plot_time, y=plot_actual, name='Actual', line=dict(color='black', width=2)),
+        row=2, col=1
+    )
+
+    # Add Prediction Traces
+    colors = ['#636EFA', '#EF553B', '#00CC96', '#AB63FA', '#FFA15A', '#19D3F3']
+    for i, pred in enumerate(predictions_list):
+        fig.add_trace(
+            go.Scatter(x=plot_time, y=pred, name=names[i], 
+                       line=dict(width=1.5, color=colors[i % len(colors)])),
+            row=2, col=1
+        )
+
+    # Update Layout with Slider
+    fig.update_layout(
+        height=900,
+        template="plotly_white",
+        hovermode="x unified",
+        xaxis2=dict(rangeslider=dict(visible=True), type="date")
+    )
+
+    fig.write_html(output_filename)
+    print(f"✅ Full dashboard with metrics saved to: {output_filename}")
+
+def analyze_lr_history(history, start_lr, growth_denominator=10):
+    losses = np.array(history.history['loss'])
+    lrs = start_lr * (10 ** (np.arange(len(losses)) / growth_denominator))
+
+    valid_idx = np.isfinite(losses)
+    losses, lrs = losses[valid_idx], lrs[valid_idx]
+
+    # Find key indices
+    min_idx = np.argmin(losses)
+    # Use a gradient of the loss to find the steepest descent
+    grads = np.gradient(losses)
+    steepest_idx = np.argmin(grads)
+
+    # Strategy A: One order of magnitude before the minimum
+    safe_min_lr = lrs[min_idx] / 10
+    
+    # Strategy B: The steepest slope
+    steepest_lr = lrs[steepest_idx]
+
+    # Final Recommendation: Usually the smaller of the two for high stability
+    recommended_lr = min(safe_min_lr, steepest_lr)
+
+    print(f"Minimum Loss LR:   {lrs[min_idx]:.2e}")
+    print(f"Steepest Slope LR: {steepest_lr:.2e}")
+    print(f"Safe/Stable LR:    {recommended_lr:.2e}")
+    
+    return recommended_lr
 
 if __name__ == '__main__':
 
@@ -806,64 +1019,88 @@ if __name__ == '__main__':
         dataset_csv = download_dataset()
         print(dataset_csv)
 
-        fill_missing_datapoints(dataset_csv)
+        dataset_csv = fill_missing_with_linear_extrapolation(dataset_csv)
 
         #print_data_head(dataset_csv, num_rows=20, column_name='Sunspots_WMA')
 
-        dataset_csv = delete_first_x_data_rows(dataset_csv, rows_to_skip=7)
+        SKIP_ROWS = 7
 
-        save_all_data_to_csv_in_folder(dataset_csv, filename="Sunspots_Processed_WMA.csv", index_name='Date')
+        dataset_csv = delete_first_x_data_rows(dataset_csv, rows_to_skip=SKIP_ROWS)
 
-        sun_spot_timeseries = extract_column_to_numpy(dataset_csv, column_name = 'Number of Sunspots filled')
-        time_timeseries = cut_first_column_to_numpy(dataset_csv)
+        save_all_data_to_csv_in_folder(dataset_csv, filename="Sunspots_linear_extrapolation.csv", index_name='Date')
+
+        sun_spot_timeseries = extract_column_to_numpy(dataset_csv, column_name = 'Number of Sunspots filled').astype('float32')
+        time_line = cut_first_column_to_numpy(dataset_csv)
 
         print("sun_spot_timeseries")
         print(sun_spot_timeseries[0:5])
         print("time_timeseries")
-        print(time_timeseries[0:5])
+        print(time_line[0:5])
+
+        # Assuming your dataset starts on January 1st, 1818
+        start_date = np.datetime64('1818-01-08') #(SKIP_ROWS)
+        time_converted = start_date + np.array(time_line, dtype='timedelta64[D]')
+        generate_timeseries_analysis_chart(time_line, sun_spot_timeseries, title="Sunspot Data Verification")
 
         print("train_val_split")
-        time_train, features_train, time_valid, features_valid = train_val_split(time_timeseries, sun_spot_timeseries)
+        time_train, features_train, time_valid, features_valid = train_val_split(time_line, sun_spot_timeseries)
+
+        print("standardization")
+        train_min, train_max = features_train.min(), features_train.max()
+        features_train = (features_train - train_min) / (train_max - train_min)
+        features_valid = (features_valid - train_min) / (train_max - train_min)
         features_train = features_train.astype('float32')
         features_valid = features_valid.astype('float32')
 
         print("windowed_dataset")
         train_dataset = windowed_dataset(features_train, window_size=hparams['WINDOW_SIZE'])
-        validation_dataset = windowed_dataset(features_valid, window_size=hparams['WINDOW_SIZE'])
+        validation_dataset = windowed_dataset(features_valid, window_size=hparams['WINDOW_SIZE'], shuffle = False)
 
-        #learning rate optimization
-        #print("learning rate optimization")
-        #lr_history = adjust_learning_rate(train_dataset)
+        train_dataset_final = train_dataset
+        validation_dataset_final = validation_dataset
 
-        SHUFFLE_BUFFER_SIZE = 1000
-        PREFETCH_BUFFER_SIZE = tf.data.AUTOTUNE
-        train_dataset_final = train_dataset.cache().shuffle(SHUFFLE_BUFFER_SIZE).prefetch(PREFETCH_BUFFER_SIZE)#.batch(hparams['BATCH_SIZE'])
-        validation_dataset_final = validation_dataset.cache().prefetch(PREFETCH_BUFFER_SIZE)#.batch(hparams['BATCH_SIZE'])
+        if LR_FINDER:
+            print("learning rate optimization")
+            lr_history = adjust_learning_rate(train_dataset)
+            recomended_lr = analyze_lr_history(lr_history, hparams['LRF_START_LR'], hparams['LRF_GROWTH_DENOMINATOR'])
+            print(f"Recomended Learning Rate used: {recomended_lr}")
 
-        print(f"Buffered {SHUFFLE_BUFFER_SIZE} elements for the training dataset.")
+            if LR_FINDER_TEST:
+                # Define the learning rates you want to test
+                learning_rates = [4e-3, 1e-4, 2e-4, 3e-4, 4e-4, 5e-4]
+                models = []
+                histories = []
 
-        print()
+                print("\nLR Finder test: Create and compile models")
 
-        print(f"Create and compile model")
-        nn_model_0 = create_uncompiled_model()
-        nn_model_1 = create_uncompiled_model()
-        nn_model_2 = create_uncompiled_model()
-        nn_model_3 = create_uncompiled_model()
-        nn_model_4 = create_uncompiled_model()
-        nn_model_5 = create_uncompiled_model()
-        nn_model_2.summary()
+                for i, lr in enumerate(learning_rates):
+                    # Create and compile model
+                    model = create_uncompiled_model()
+                    if i == 2: model.summary() # Keep summary for the 3rd model as in original
+                    
+                    hparams['LEARNING_RATE'] = lr
+                    compile_model(model)
+                    models.append(model)
 
-        compile_model(nn_model_0, 4E-3)
-        compile_model(nn_model_1, 1E-4)
-        compile_model(nn_model_2, 2E-4)
-        compile_model(nn_model_3, 3E-4)
-        compile_model(nn_model_4, 4E-4)
-        compile_model(nn_model_5, 5E-4)
+                    # Train model
+                    print(f"Training model n.{i+1} (LR: {lr})")
+                    history = model.fit(
+                        x=train_dataset_final,
+                        epochs=hparams['EPOCHS'],
+                        validation_data=validation_dataset_final,
+                        verbose='auto' # Optional: reduces clutter during multi-model training
+                    )
+                    histories.append(history)
+
+                print()
+                plot_training_histories(histories)
+            hparams['LEARNING_RATE'] = recomended_lr
+        else: pass
 
         early_stopping_callback = tf.keras.callbacks.EarlyStopping(
             monitor='val_loss',    # Monitor the validation loss
             #min_delta = 0,
-            patience=hparams['EARLY_STOP_PATIENCE'],            # Stop if val_loss doesn't improve for 5 epochs
+            patience=hparams['EARLY_STOP_PATIENCE'],            # Stop if val_loss doesn't improve for X epochs
             verbose=1,
             #mode='auto',
             #baseline=None,
@@ -871,128 +1108,130 @@ if __name__ == '__main__':
             #start_from_epoch=0
         )
 
-        learning_rate_scheduler = tf.keras.callbacks.ReduceLROnPlateau(   monitor='val_loss',
-                                                factor=hparams['REDUCE_LR_FACTOR'],
-                                                patience=hparams['REDUCE_LR_PATIENCE'],
-                                                verbose=1,
-                                                #mode='auto',
-                                                #min_delta=0.0001,
-                                                #cooldown=0,
-                                                min_lr=hparams['REDUCE_LR_MIN_LR'],
-                                                #**kwargs
-                                            )
-        print("Training model n.1")
-        training_history_0 = nn_model_0.fit(x=train_dataset_final,
-                                        #y=None,
-                                        #batch_size=None,
-                                        epochs=hparams['EPOCHS'],
-                                        #verbose='auto',
-                                        #callbacks=[early_stopping_callback, learning_rate_scheduler],
-                                        #validation_split=0.0,
-                                        validation_data=validation_dataset_final,
-                                        #shuffle=True,
-                                        #class_weight=None,
-                                        #sample_weight=None,
-                                        #initial_epoch=0,
-                                        #steps_per_epoch=None,
-                                        #validation_steps=None,
-                                        #validation_batch_size=None,
-                                        #validation_freq=1
-                                        ) 
-        print("Training model n.2")
-        training_history_1 = nn_model_1.fit(x=train_dataset_final,
-                                        #y=None,
-                                        #batch_size=None,
-                                        epochs=hparams['EPOCHS'],
-                                        #verbose='auto',
-                                        #callbacks=[early_stopping_callback, learning_rate_scheduler],
-                                        #validation_split=0.0,
-                                        validation_data=validation_dataset_final,
-                                        #shuffle=True,
-                                        #class_weight=None,
-                                        #sample_weight=None,
-                                        #initial_epoch=0,
-                                        #steps_per_epoch=None,
-                                        #validation_steps=None,
-                                        #validation_batch_size=None,
-                                        #validation_freq=1
-                                        ) 
-        print("Training model n.3")
-        training_history_2 = nn_model_2.fit(x=train_dataset_final,
-                                        #y=None,
-                                        #batch_size=None,
-                                        epochs=hparams['EPOCHS'],
-                                        #verbose='auto',
-                                        #callbacks=[early_stopping_callback, learning_rate_scheduler],
-                                        #validation_split=0.0,
-                                        validation_data=validation_dataset_final,
-                                        #shuffle=True,
-                                        #class_weight=None,
-                                        #sample_weight=None,
-                                        #initial_epoch=0,
-                                        #steps_per_epoch=None,
-                                        #validation_steps=None,
-                                        #validation_batch_size=None,
-                                        #validation_freq=1
-                                        ) 
-        print("Training model n.4")
-        training_history_3 = nn_model_3.fit(x=train_dataset_final,
-                                        #y=None,
-                                        #batch_size=None,
-                                        epochs=hparams['EPOCHS'],
-                                        #verbose='auto',
-                                        #callbacks=[early_stopping_callback, learning_rate_scheduler],
-                                        #validation_split=0.0,
-                                        validation_data=validation_dataset_final,
-                                        #shuffle=True,
-                                        #class_weight=None,
-                                        #sample_weight=None,
-                                        #initial_epoch=0,
-                                        #steps_per_epoch=None,
-                                        #validation_steps=None,
-                                        #validation_batch_size=None,
-                                        #validation_freq=1
-                                        ) 
-        print("Training model n.5")
-        training_history_4 = nn_model_4.fit(x=train_dataset_final,
-                                        #y=None,
-                                        #batch_size=None,
-                                        epochs=hparams['EPOCHS'],
-                                        #verbose='auto',
-                                        #callbacks=[early_stopping_callback, learning_rate_scheduler],
-                                        #validation_split=0.0,
-                                        validation_data=validation_dataset_final,
-                                        #shuffle=True,
-                                        #class_weight=None,
-                                        #sample_weight=None,
-                                        #initial_epoch=0,
-                                        #steps_per_epoch=None,
-                                        #validation_steps=None,
-                                        #validation_batch_size=None,
-                                        #validation_freq=1
-                                        ) 
-        print("Training model n.6")
-        training_history_5 = nn_model_5.fit(x=train_dataset_final,
-                                        #y=None,
-                                        #batch_size=None,
-                                        epochs=hparams['EPOCHS'],
-                                        #verbose='auto',
-                                        #callbacks=[early_stopping_callback, learning_rate_scheduler],
-                                        #validation_split=0.0,
-                                        validation_data=validation_dataset_final,
-                                        #shuffle=True,
-                                        #class_weight=None,
-                                        #sample_weight=None,
-                                        #initial_epoch=0,
-                                        #steps_per_epoch=None,
-                                        #validation_steps=None,
-                                        #validation_batch_size=None,
-                                        #validation_freq=1
-                                        ) 
-        
-        print()
+        learning_rate_scheduler = tf.keras.callbacks.ReduceLROnPlateau(   
+            monitor='val_loss',
+            factor=hparams['REDUCE_LR_FACTOR'],
+            patience=hparams['REDUCE_LR_PATIENCE'],
+            verbose=1,
+            #mode='auto',
+            #min_delta=0.0001,
+            #cooldown=0,
+            min_lr=hparams['REDUCE_LR_MIN_LR'],
+            #**kwargs
+        )
 
-        plot_training_histories([training_history_0, training_history_1, training_history_2, training_history_3, training_history_4, training_history_5])
+        if LOSS_FNC_TEST:
+            # Define configurations
+            loss_configs = [
+                ("Huber_01", tf.keras.losses.Huber(delta=0.1)),
+                ("Huber_005", tf.keras.losses.Huber(delta=0.05)),
+                ("MSE", tf.keras.losses.MeanSquaredError()),
+                ("MAE", tf.keras.losses.MeanAbsoluteError()),
+                #("LogCosh", tf.keras.losses.LogCosh()),
+                #("Quantile", MyLossLib.QuantileLoss(quantile=0.9)),
+                #("Dilate", MyLossLib.DilateLoss(alpha=0.8, gamma=0.5)),
+                #("PatchStructural", MyLossLib.PatchStructuralLoss(patch_size=10)),
+                #("ExtremePeak", MyLossLib.ExtremePeakLoss(alpha=3.0))
+            ]
+
+            all_histories = []
+
+            models = []
+
+            # Train each model
+            for name, loss_fnc in loss_configs:
+                print(f"\n--- Testing Loss Function: {name} ---")
+                hparams['LOSS_FUNCTION'] = loss_fnc
+                
+                model = create_uncompiled_model()
+                model._name = name # Set the name for plotting
+                compile_model(model)
+                
+                history = model.fit(
+                    x=train_dataset_final,
+                    #y=None,
+                    #batch_size=None,
+                    epochs=hparams['EPOCHS'],
+                    verbose='auto',
+                    callbacks=[ learning_rate_scheduler, early_stopping_callback], 
+                    #validation_split=0.0,
+                    validation_data=validation_dataset_final,
+                    #shuffle=True,
+                    #class_weight=None,
+                    #sample_weight=None,
+                    #initial_epoch=0,
+                    #steps_per_epoch=None,
+                    #validation_steps=None,
+                    #validation_batch_size=None,
+                    #validation_freq=1
+                )
+                
+                # Tag the history object for our plotter
+                history.user_defined_name = name
+                all_histories.append(history)
+
+                models.append(model)
+
+            # Generate Comparison Table (The neutral third-party metric report)
+            print("\n" + "="*50)
+            print(f"{'Model Loss Function':<20} | {'Val MAE':<10} | {'Val RMSE':<10}")
+            print("-" * 50)
+            
+            for h in all_histories:
+                v_mae = min(h.history['val_mae'])
+                v_rmse = min(h.history['val_rmse'])
+                print(f"{h.user_defined_name:<20} | {v_mae:<10.4f} | {v_rmse:<10.4f}")
+            print("="*50)
+
+            # 4. Save the interactive chart
+            plot_training_histories(all_histories, filename="Loss_Function_Comparison.html")
+
+        else:
+            pass 
+
+        hparams['LOSS_FUNCTION'] = tf.keras.losses.Huber() 
+
+        # Create final model
+        print("Final model:")
+        nn_model = create_uncompiled_model()
+        nn_model.summary()
+        compile_model(nn_model)
+
+        window_offset = hparams['WINDOW_SIZE']
+
+        actual_values = features_valid[window_offset:]
+        model_names = [config[0] for config in loss_configs]
+
+        final_predictions = []
+        all_metric_results = []
+        for i, model in enumerate(models):
+            final_prediction = generate_model_predictions(...)
+            
+            # Get the number of predictions we actually have
+            num_preds = len(final_prediction)
+            
+            # Slice the actual values and time from the END to match the number of predictions
+            # This handles any off-by-one errors from windowing automatically
+            current_actual_values = features_valid[-num_preds:]
+            current_time_valid = time_valid[-num_preds:]
+            
+            # Unscale the actual values for metric calculation (using the same length)
+            actual_unscaled = (current_actual_values * (train_max - train_min)) + train_min
+
+            # Evaluate with perfectly matched lengths
+            metrics = evaluate_predictions(actual_unscaled, final_prediction, model_names[i])
+            all_metric_results.append(metrics)
+            
+            # Store for the dashboard
+            final_predictions.append(final_prediction)
+
+        generate_comparison_dashboard(
+            time=current_time_valid,
+            actual_series=actual_unscaled,
+            predictions_list=final_predictions,
+            metrics_list=all_metric_results,
+            output_filename="Sunspot_Comparison_Dashboard.html"
+        )
 
         exit()
 
@@ -1004,12 +1243,6 @@ if __name__ == '__main__':
         nn_model.save(SAVED_MODEL_PATH, save_format='tf')
         print("\nModel saved to {SAVED_MODEL_PATH}")
 
-        predictions = nn_model.predict(test_dataset_raw.batch(hparams['BATCH_SIZE']), #x
-                                       #batch_size=None, 
-                                       verbose=False, 
-                                       #steps=None, 
-                                       #callbacks=None
-                                       )
 
         prediction_csv_path = os.path.join(current_dir, "submission.csv")
         save_predictions_to_csv(predictions, ids_test, prediction_csv_path)
