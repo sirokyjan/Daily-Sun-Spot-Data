@@ -11,7 +11,7 @@ import kagglehub
 import shutil
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 
-LR_FINDER = 1
+LR_FINDER = 0
 LR_FINDER_TEST = 0
 LOSS_FNC_TEST = 1
 
@@ -43,12 +43,12 @@ hparams = {
     "LRF_GROWTH_DENOMINATOR": 10,
 
     # Training
-    "LEARNING_RATE": 1e-05,
+    "LEARNING_RATE": 1.6e-06,
     "EARLY_STOP_PATIENCE": 10,
-    "REDUCE_LR_PATIENCE": 7,
+    "REDUCE_LR_PATIENCE": 8,
     "REDUCE_LR_FACTOR": 0.5,
-    "REDUCE_LR_MIN_LR": 0.00001,
-    "EPOCHS": 3
+    "REDUCE_LR_MIN_LR": 1.6e-06/32,
+    "EPOCHS": 800
 }
 
 def download_dataset():
@@ -472,9 +472,9 @@ def create_uncompiled_model():
         tf.keras.layers.LSTM(hparams['LSTM_UNITS_1'], return_sequences=True),
         tf.keras.layers.LSTM(hparams['LSTM_UNITS_2']),
         tf.keras.layers.Dense(hparams['DENSE_UNITS_1'], activation="relu"),
-        tf.keras.layers.Dropout(hparams['DROPOUT'], name='dropout_1'),
+        #tf.keras.layers.Dropout(hparams['DROPOUT'], name='dropout_1'),
         tf.keras.layers.Dense(hparams['DENSE_UNITS_2'], activation="relu"),
-        tf.keras.layers.Dropout(hparams['DROPOUT'], name='dropout_2'),
+        #tf.keras.layers.Dropout(hparams['DROPOUT'], name='dropout_2'),
         tf.keras.layers.Dense(1)  
         ])
 
@@ -642,7 +642,7 @@ def adjust_learning_rate(dataset):
             )
     smoothed_loss = pd.Series(history.history['loss']).ewm(span=10).mean()
     plot_learningrate_loss_chart(lrs, loss_data, hparams['LRF_START_LR'], final_lr, min_loss * 0.9, max_loss * 1.1)
-    plot_learningrate_loss_chart(lrs, smoothed_loss, hparams['LRF_START_LR'], final_lr, min_loss * 0.9, max_loss * 1.1)
+    #plot_learningrate_loss_chart(lrs, smoothed_loss, hparams['LRF_START_LR'], final_lr, min_loss * 0.9, max_loss * 1.1)
     
     return history
 
@@ -1098,7 +1098,7 @@ if __name__ == '__main__':
         else: pass
 
         early_stopping_callback = tf.keras.callbacks.EarlyStopping(
-            monitor='val_loss',    # Monitor the validation loss
+            monitor='val_mae',    # Monitor the validation loss
             #min_delta = 0,
             patience=hparams['EARLY_STOP_PATIENCE'],            # Stop if val_loss doesn't improve for X epochs
             verbose=1,
@@ -1109,7 +1109,7 @@ if __name__ == '__main__':
         )
 
         learning_rate_scheduler = tf.keras.callbacks.ReduceLROnPlateau(   
-            monitor='val_loss',
+            monitor='val_mae',
             factor=hparams['REDUCE_LR_FACTOR'],
             patience=hparams['REDUCE_LR_PATIENCE'],
             verbose=1,
@@ -1123,8 +1123,9 @@ if __name__ == '__main__':
         if LOSS_FNC_TEST:
             # Define configurations
             loss_configs = [
-                ("Huber_01", tf.keras.losses.Huber(delta=0.1)),
+                ("Huber_004", tf.keras.losses.Huber(delta=0.04)),
                 ("Huber_005", tf.keras.losses.Huber(delta=0.05)),
+                ("Huber_006", tf.keras.losses.Huber(delta=0.06)),
                 ("MSE", tf.keras.losses.MeanSquaredError()),
                 ("MAE", tf.keras.losses.MeanAbsoluteError()),
                 #("LogCosh", tf.keras.losses.LogCosh()),
@@ -1140,6 +1141,9 @@ if __name__ == '__main__':
 
             # Train each model
             for name, loss_fnc in loss_configs:
+                # prevent memory leakage or weight carry-over between tests
+                tf.keras.backend.clear_session()
+
                 print(f"\n--- Testing Loss Function: {name} ---")
                 hparams['LOSS_FUNCTION'] = loss_fnc
                 
@@ -1205,7 +1209,14 @@ if __name__ == '__main__':
         final_predictions = []
         all_metric_results = []
         for i, model in enumerate(models):
-            final_prediction = generate_model_predictions(...)
+            final_prediction = generate_model_predictions(
+                model=model,               # The current model from your loop
+                series=features_valid,     # The validation data series
+                window_size=hparams['WINDOW_SIZE'],
+                batch_size=hparams['BATCH_SIZE'],
+                train_min=train_min, 
+                train_max=train_max
+            )
             
             # Get the number of predictions we actually have
             num_preds = len(final_prediction)
