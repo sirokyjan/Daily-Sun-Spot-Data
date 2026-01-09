@@ -10,6 +10,11 @@ import json
 import kagglehub
 import shutil
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
+from tensorflow.keras.models import Model
+from tensorflow.keras.losses import Loss
+from tensorflow.keras.layers import Layer
+from tensorflow.keras.layers import concatenate
+from tensorflow.keras.layers import Dense
 
 LR_FINDER = 0
 LR_FINDER_TEST = 0
@@ -331,107 +336,6 @@ def train_val_split(time, series):
 
     return time_train, series_train, time_valid, series_valid
 
-def generate_sales_dashboard(sales_df, events_df=None, output_filename="sales_dashboard.html"):
-    """
-    Generates an interactive HTML dashboard with sales data and optional event markers.
-
-    Args:
-        sales_df (pd.DataFrame): DataFrame with sales data. 
-                                    Must contain 'date', 'family', and 'sales' columns.
-        events_df (pd.DataFrame, optional): DataFrame with event data. 
-                                            Must contain 'date' and 'description' columns. Defaults to None.
-        output_filename (str): The name of the output HTML file.
-    """
-    
-    # Prepare the Data 
-    
-    # Ensure date column is in datetime format
-    sales_df['date'] = pd.to_datetime(sales_df['date'])
-    
-    # Aggregate total sales per day for the first chart
-    total_sales_by_date = sales_df.groupby('date')['sales'].sum().reset_index()
-    
-    # Pivot the data for the second chart to have one column per product family
-    family_sales_by_date = sales_df.pivot_table(
-        index='date', 
-        columns='family', 
-        values='sales', 
-        aggfunc='sum'
-    ).fillna(0)
-
-    # Create the Figure with Subplots
-    fig = make_subplots(
-        rows=2, 
-        cols=1, 
-        subplot_titles=("Total Store Sales", "Sales by Product Family"),
-        vertical_spacing=0.15
-    )
-
-    # Add Traces for the First Chart (Total Sales)
-    fig.add_trace(
-        go.Scatter(
-            x=total_sales_by_date['date'], 
-            y=total_sales_by_date['sales'], 
-            mode='lines', 
-            name='Total Sales',
-            line=dict(color='royalblue')
-        ), 
-        row=1, col=1
-    )
-
-    # Add Traces for the Second Chart (Sales by Family)
-    for family in family_sales_by_date.columns:
-        fig.add_trace(
-            go.Scatter(
-                x=family_sales_by_date.index, 
-                y=family_sales_by_date[family], 
-                mode='lines', 
-                name=family
-            ), 
-            row=2, col=1
-        )
-        
-    # Add Event Markers if events_df is provided
-    if events_df is not None:
-        events_df['date'] = pd.to_datetime(events_df['date'])
-        
-        # Add an invisible scatter trace for hover text
-        if not total_sales_by_date.empty:
-            fig.add_trace(
-                go.Scatter(
-                    x=events_df['date'],
-                    # Position markers near the top of the chart
-                    y=[total_sales_by_date['sales'].max() * 0.95] * len(events_df),
-                    mode='markers',
-                    marker=dict(color='rgba(0,0,0,0)', size=10), # Invisible markers
-                    hoverinfo='text',
-                    text=events_df['description'], # Text to show on hover
-                    name='Events',
-                    showlegend=False
-                ),
-                row=1, col=1
-            )
-
-        for index, event in events_df.iterrows():
-            # Add a vertical line for the event date on both charts
-            fig.add_vline(x=event['date'], line_width=1, line_dash="dash", line_color="red", row="all", col=1)
-
-    #Update Layout and Save
-    fig.update_layout(
-        title_text="Store Sales In Ecuador",
-        height=800,
-        legend_title_text='Product Family'
-    )
-    
-    fig.update_yaxes(title_text="Total Sales", row=1, col=1)
-    fig.update_yaxes(title_text="Sales per Family", row=2, col=1)
-
-    try:
-        fig.write_html(output_filename)
-        print(f"Interactive chart saved successfully to '{output_filename}'")
-    except IOError as e:
-        print(f"Error saving chart: {e}")
-
 
 def windowed_dataset(series, window_size, shuffle=True):
     series = tf.expand_dims(series, axis=-1)
@@ -465,18 +369,23 @@ def create_uncompiled_model():
         tf.keras.Model: uncompiled model
     """
   
-    model = tf.keras.models.Sequential([
-        tf.keras.Input(shape=(hparams['WINDOW_SIZE'],1)),
-        tf.keras.layers.Conv1D(filters=hparams['CONV_FILTERS_1'], kernel_size=hparams['CONV_KERNEL_1'], strides=1,padding="causal", activation="relu"),
-        tf.keras.layers.LayerNormalization(), # Added for stability
-        tf.keras.layers.LSTM(hparams['LSTM_UNITS_1'], return_sequences=True),
-        tf.keras.layers.LSTM(hparams['LSTM_UNITS_2']),
-        tf.keras.layers.Dense(hparams['DENSE_UNITS_1'], activation="relu"),
-        #tf.keras.layers.Dropout(hparams['DROPOUT'], name='dropout_1'),
-        tf.keras.layers.Dense(hparams['DENSE_UNITS_2'], activation="relu"),
-        #tf.keras.layers.Dropout(hparams['DROPOUT'], name='dropout_2'),
-        tf.keras.layers.Dense(1)  
-        ])
+    # instantiate the input Tensor
+    input_layer =tf.keras.Input(shape=(hparams['WINDOW_SIZE'],1))
+    
+    # stack the layers
+    x = tf.keras.layers.Conv1D(filters=hparams['CONV_FILTERS_1'], kernel_size=hparams['CONV_KERNEL_1'], strides=1,padding="causal", activation="relu")(input_layer)
+    x = tf.keras.layers.LayerNormalization()(x) # Added for stability
+    x = tf.keras.layers.LSTM(hparams['LSTM_UNITS_1'], return_sequences=True)(x)
+    x = tf.keras.layers.LSTM(hparams['LSTM_UNITS_2'])(x)
+    x = tf.keras.layers.Dense(hparams['DENSE_UNITS_1'], activation="relu")(x)
+    #x = tf.keras.layers.Dropout(hparams['DROPOUT'], name='dropout_1')(x)
+    x = tf.keras.layers.Dense(hparams['DENSE_UNITS_2'], activation="relu")(x)
+    x = tf.keras.layers.Lambda(dummy_lambda_function)(x) #no fucntion at the moment
+    #x = tf.keras.layers.Dropout(hparams['DROPOUT'], name='dropout_2')(x)
+    output_layer = tf.keras.layers.Dense(1)(x)
+    
+    # declare inputs and outputs
+    model = Model(inputs=input_layer, outputs=output_layer)
 
     return model
 
@@ -1123,16 +1032,21 @@ if __name__ == '__main__':
         if LOSS_FNC_TEST:
             # Define configurations
             loss_configs = [
-                ("Huber_004", tf.keras.losses.Huber(delta=0.04)),
-                ("Huber_005", tf.keras.losses.Huber(delta=0.05)),
+                #("Huber_004", tf.keras.losses.Huber(delta=0.04)),
+                #("Huber_005", tf.keras.losses.Huber(delta=0.05)),
                 ("Huber_006", tf.keras.losses.Huber(delta=0.06)),
-                ("MSE", tf.keras.losses.MeanSquaredError()),
-                ("MAE", tf.keras.losses.MeanAbsoluteError()),
-                #("LogCosh", tf.keras.losses.LogCosh()),
-                #("Quantile", MyLossLib.QuantileLoss(quantile=0.9)),
-                #("Dilate", MyLossLib.DilateLoss(alpha=0.8, gamma=0.5)),
-                #("PatchStructural", MyLossLib.PatchStructuralLoss(patch_size=10)),
-                #("ExtremePeak", MyLossLib.ExtremePeakLoss(alpha=3.0))
+                #("MSE", tf.keras.losses.MeanSquaredError()),
+                #("MAE", tf.keras.losses.MeanAbsoluteError()),
+                ("LogCosh", tf.keras.losses.LogCosh()),
+                ("Quantile_09", MyLossLib.QuantileLoss(quantile=0.9)),
+                ("Quantile_08", MyLossLib.QuantileLoss(quantile=0.8)),
+                ("Dilate", MyLossLib.DilateLoss(alpha=0.8, gamma=0.5)),
+                ("PatchStructural_10", MyLossLib.PatchStructuralLoss(patch_size=10)),
+                ("PatchStructural_15", MyLossLib.PatchStructuralLoss(patch_size=15)),
+                ("PatchStructural_5", MyLossLib.PatchStructuralLoss(patch_size=5)),
+                ("ExtremePeak_4", MyLossLib.ExtremePeakLoss(alpha=4.0)),
+                ("ExtremePeak_3", MyLossLib.ExtremePeakLoss(alpha=3.0)),
+                ("ExtremePeak_2", MyLossLib.ExtremePeakLoss(alpha=2.0))
             ]
 
             all_histories = []
